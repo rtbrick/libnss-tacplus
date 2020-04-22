@@ -1,0 +1,34 @@
+# This is a common file used by audisp-tacplus, libpam_tacplus, and
+# libtacplus_map config files as shipped.
+#
+# Any tac_plus client config can go here that is common to all users of this
+# file, but typically it's just the TACACS+ server IP address(es) and shared
+# secret(s)
+#
+# This file should normally be mode 600, if you care about the security
+# of your secret key.   When set to mode 600 NSS lookups for TACACS users
+# will only work for tacacs users that are logged in, via the local mapping.
+# For root, lookups will work for any tacacs users, logged in or not.
+
+# Set a default connection timeout of 10 seconds, and enable the use of
+# poll() when trying to read from tacacs servers.
+# Otherwise standard TCP timeouts apply.
+# Not set or set to a negative value disables use of poll().
+#timeout=1
+
+secret=geheim
+server=10.0.3.110
+
+# If the management network is in a vrf, set this variable to the vrf name.
+# This would usually be "mgmt"
+# When this variable is set, the connection to the TACACS+ accounting servers
+# will be made through the named vrf.
+#vrf=mgmt
+
+# If user_homedir=1, then tacacs users will be set to have a home directory
+# based on their login name, rather than the mapped tacacsN home directory.
+# mkhomedir_helper is used to create the directory if it does not exist (similar
+# to use of pam_mkhomedir.so).   This flag is ignored for users with restricted
+# shells, e.g., users mapped to a tacacs privilege level that has enforced
+# per-command authorization (see the tacplus-restrict man page).
+ user_homedir=1
