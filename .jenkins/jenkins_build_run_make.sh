@@ -40,4 +40,5 @@ trap 'trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
 
 ./auto.sh;
 ./configure;
+make clean;
 make;
