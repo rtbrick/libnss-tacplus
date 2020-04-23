@@ -45,6 +45,8 @@
 
 #include "nss_tacplus.h"
 
+#define USERNAME_MAX_LEN 20 /* match mapped name in mapfile */
+
 static const char *nssname = "nss_tacplus"; /* for syslogs */
 static const char *config_file = "/etc/tacplus_nss.conf";
 
@@ -428,7 +430,7 @@ find_pw_userpriv(unsigned priv, struct pwbuf *pb)
     int matches, ret, retu, rett;
     unsigned origpriv = priv;
     char ubuf[pb->buflen], tbuf[pb->buflen];
-    char tacuser[9]; /* "tacacs" followed by 1-2 digits */
+    char tacuser[USERNAME_MAX_LEN]; /* "tacacs" followed by 1-2 digits */
 
     tacuser[0] = '\0';
 
@@ -439,7 +441,7 @@ find_pw_userpriv(unsigned priv, struct pwbuf *pb)
     }
 
 recheck:
-    snprintf(tacuser, sizeof tacuser, "tacacs%u", priv);
+    get_mapuser(NULL, priv, tacuser);
     tpw.pw_name = upw.pw_name = NULL;
     retu = 0, rett = 0;
     for(matches=0; matches < 2 && (ent = fgetpwent(pwfile)); ) {
