@@ -54,5 +54,5 @@ install-data-hook:
 	cd .libs && $(INSTALL_PROGRAM) libnss_tacplus.so $(DESTDIR)$(libdir)/$(NSS_TACPLUS_LIBC_VERSIONED)
 	$(STRIP) --keep-symbol=_nss_tacplus_getpwnam_r --keep-symbol=_nss_tacplus_getpwuid_r $(DESTDIR)$(libdir)/$(NSS_TACPLUS_LIBC_VERSIONED)
 	cd $(DESTDIR)$(libdir); ln -sf $(NSS_TACPLUS_LIBC_VERSIONED) $(NSS_TACPLUS_NSS_VERSIONED)
-	${INSTALL} -m 644 tacplus_nss.conf $(DESTDIR)$(sysconfdir)
+	${INSTALL} -m 644 tacplus-config/tacplus_nss.conf $(DESTDIR)$(sysconfdir)
 
