@@ -1062,7 +1062,7 @@ docker_prepare() {
 
 	# Connect the container to the build specific network.
 	local i="0";
-	while [ "$i" -lt "$new_conts_len" ]; do
+	while [ "$i" -lt "$new_conts_len" ] && [ "${docker_net_skip:-0}" -ne "1" ]; do
 		local cont_conf="";
 		local cont_name="";
 		local dckr_name="";
@@ -1096,7 +1096,7 @@ docker_prepare() {
 	# Add the hosts entries so every container can reach every other
 	# container by name.
 	local i="0";
-	while [ "$i" -lt "$new_conts_len" ]; do
+	while [ "$i" -lt "$new_conts_len" ] && [ "${docker_net_skip:-0}" -ne "1" ]; do
 		local cont_conf="";
 		local cont_name="";
 		local dckr_name="";

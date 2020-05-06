@@ -30,7 +30,7 @@ StandardError=file:/var/log/{{ .ServiceName }}-service-err.log
 # but excluding signals SIGHUP, SIGINT, SIGTERM or SIGPIPE.
 #     https://www.freedesktop.org/software/systemd/man/systemd.service.html#Restart=
 #
-Restart=on-failure
+Restart=no
 
 # The time to sleep before restarting a service (as configured with Restart=).
 #     https://www.freedesktop.org/software/systemd/man/systemd.service.html#RestartSec=

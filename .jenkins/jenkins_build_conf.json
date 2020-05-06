@@ -1,6 +1,12 @@
 {
     "bionic": {},
 
+    "onl": {
+        "pkg_group": "rtbrick-onl",
+
+        "upload_cmd": ".jenkins/jenkins_upload_to_latest_debian_rtbrick-onl_stretch_rtbrick-onl.sh"
+    },
+
     "__defaults__": {
         "project": "rtbrick-libnss-tacplus",
         "version_mmr": {"major": 1, "minor": 0, "rev": 1, "label": "", "meta": ""},

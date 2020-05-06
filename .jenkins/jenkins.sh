@@ -101,6 +101,7 @@ keep_failed="";				# Docker containers and networks are cleaned up automatically
 local_build="";				# If this is set via the -L CLI option
 					# vars expected from Jenkins are calculated
 					# locally and the DEB package is not uploaded.
+docker_net_skip="";			# Skip configuring docker networks for containers.
 upload_force="";			# Force the upload of the resulting package
 					# even if this is a local build.
 ssh_agent_fwd="0";			# Forward the local SSH Agent inside all containers.
@@ -112,7 +113,7 @@ print_usage() {
 	[ -z "$whoami" ] && [ -n "${ME:-}" ] && whoami="$ME";
 	[ -z "$whoami" ] && whoami="jenkins.sh";
 
-	printf "\nUsage: %s [-d[d]] [-L [-W]] [-C build_conf_json ] -B build_name [-N build_job_hash] [-K] [-S build_step] [-T build|package|upload ]\n\n" "$whoami";
+	printf "\nUsage: %s [-d[d]] [-L [-W]] [-C build_conf_json ] -B build_name [-N build_job_hash] [-K] [-O] [-S build_step] [-T build|package|upload ]\n\n" "$whoami";
 	printf "\t-A\t\tForward the local SSH Agent inside all containers.\n";
 	printf "\t-L\t\tLocal build. Most of the times this is needed when running %s manually.\n" "$whoami";
 	printf "\t-W\t\tForce the upload of the package for local builds, for which normally we don't try to upload the package.\n";
@@ -124,11 +125,12 @@ print_usage() {
 	printf "\t-T step\t\tRun only one of the 3 high level steps: build, package or upload. Default is to run all 3.\n";
 	printf "\t-N build_job_hash\tCleanup an existing set of docker containers left over from a previous (failed) build.\n";
 	printf "\t-K\t\tKeep failed. Docker containers and networks are cleaned up automatically even for failed builds. If this is set then keep them after a failed build for troubleshooting.\n";
+	printf "\t-O\t\tSkip configuring docker networks for the spawned containers.\n";
 	printf "\t-d\t\tDebugging, use twice to activate the shell trace option.\n\n";
 }
 
 # Parse CLI options.
-args=$(getopt hdALWC:B:N:KS:T: "$@") || {
+args=$(getopt hdALWC:B:N:KOS:T: "$@") || {
 	>&2 echo "Invalid CLI options.";
 	>&2 print_usage "$@";
 	exit 2;
@@ -156,6 +158,8 @@ while [ $# -ne 0 ]; do
 			cleanup_hash="$2"; shift; shift;;
 		-K)
 			keep_failed="1"; shift;;
+		-O)
+			docker_net_skip="1"; shift;;
 		-S)
 			build_step="$2"; shift; shift;;
 		-T)
