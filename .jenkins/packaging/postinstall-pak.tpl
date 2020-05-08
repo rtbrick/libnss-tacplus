@@ -34,3 +34,5 @@ if [ "__{{ .ServiceName }}" != "__" ] && [ "__{{ .ServiceName }}" != "__ " ]; th
 fi
 
 # Add more commands after this line.
+
+[ ! -f "/etc/tacplus_nss.conf" ] && cp /usr/local/etc/tacplus_nss.conf /etc/tacplus_nss.conf;
