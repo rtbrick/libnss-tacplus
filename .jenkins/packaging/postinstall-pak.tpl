@@ -36,3 +36,9 @@ fi
 # Add more commands after this line.
 
 [ ! -f "/etc/tacplus_nss.conf" ] && cp /usr/local/etc/tacplus_nss.conf /etc/tacplus_nss.conf;
+
+# Verify if /etc/nsswitch.conf already contains tacplus. We don't just want to
+# overwrite the file since it might be different between Ubuntu vs. Debian, etc.
+cat "/etc/nsswitch.conf" | grep -E '^[[:space:]]*passwd:.*tacplus.*' 1>/dev/null 2>/dev/null || {
+	sed -iE 's/^([[:space:]]*passwd:.*)/\1 tacplus # changed by the rtbrick-libnss-tacplus package/g' "/etc/nsswitch.conf";
+}

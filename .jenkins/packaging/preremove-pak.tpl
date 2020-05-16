@@ -29,3 +29,9 @@ if [ "__{{ .ServiceName }}" != "__" ] && [ "__{{ .ServiceName }}" != "__ " ]; th
 fi
 
 # Add more commands after this line.
+
+# Verify if /etc/nsswitch.conf contains tacplus and try to cleanup if it does.
+cat "/etc/nsswitch.conf" | grep -E '^[[:space:]]*passwd:.*tacplus.*' 1>/dev/null 2>/dev/null && {
+	sed -iE 's/# changed by the rtbrick-libnss-tacplus package//g' "/etc/nsswitch.conf";
+	sed -iE 's/^([[:space:]]*passwd:.*)tacplus(.*)/\1 \2/' "/etc/nsswitch.conf";
+}
