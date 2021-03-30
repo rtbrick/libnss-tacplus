@@ -17,12 +17,9 @@ trap_debug() {
 	header="$(date "$DATE_FMT") ERROR:";
 	[ -t 2 ] && header="\e[91m$header\e[0m";
 
-	>&2 printf "$header command '%s' failed with exit code %d at line %d in %s\n" \
-		"$cmd" "$rc" "$lineno" "$file";
-	[ -z "$keep_failed" ] && {
-		>&2 printf "$header trying to cleanup docker containers and networks\n";
-		docker_cleanup "$build_name" "$build_job_hash";
-	}
+	>&2 printf "%s command '%s' failed with exit code %d at line %d in %s\n" \
+		"$header" "$cmd" "$rc" "$lineno" "$file";
+
 	return "$rc";
 }
 
@@ -87,19 +84,38 @@ DOCKER_SANITIZER='\?|\+|\.|\\|\/|-|:|;';
 # DATE_FMT the format for printing date and time in log messages.
 DATE_FMT='+%Y-%m-%d %H:%M:%S %Z';
 
-# Software version files and locations.
+# Software version files and locations. These are also used in jenkins_package_create_deb.sh,
+# script which sources the current one. SW_VERS_INSTALL is only used in jenkins_package_create_deb.sh.
 SW_VERS_LOCATION="${__jenkins_scripts_dir:-./.jenkins}/software_versions";
 SW_VERS_TPL="${__jenkins_scripts_dir:-./.jenkins}/software_versions/version.json.tpl";
+# shellcheck disable=SC2034
 SW_VERS_INSTALL="/usr/share/rtbrick/packages";
+
+# RTB_IMGSTORES_CACHE is the default cache location of image stores.
+RTB_IMGSTORES_CACHE="/var/cache/rtbrick/imagestores/"
+
+# Prometheus default variables.
+PROM_PUSH_GW="http://grafs.rtbrick.net:9091/metrics"
+PROM_CURL_LOG="/tmp/prometheus_pushgateway_curl"
 
 # Dependencies on other programs which might not be installed. If any of these
 # are missing the script will exit here with an error.
-_apt="$(which apt)";		export _apt;
-_bc="$(which bc)";		export _bc;
-_git="$(which git)";		export _git;
-_jq="$(which jq) -er";		export _jq;
-_perl="$(which perl)";		export _perl;
+_apt="$(which apt)";			export _apt;
+_bc="$(which bc)";			export _bc;
+_curl="$(which curl)";			export _curl;
+_git="$(which git)";			export _git;
+_hostname="$(which hostname)"		export _hostname;
+_jq="$(which jq) -er";			export _jq;
+_perl="$(which perl)";			export _perl;
 _sha256sum="$(which sha256sum || which sha256)"; export _sha256sum;
+
+# We can't actually check for the existence of the docker command since this
+# might be sourced from a script already running inside a docker container.
+# However jenkins.sh (or another caller) might have already set _docker to an
+# appropriate value. If not set it to 'docker' and hope for the best (which is
+# usually not a good strategy).
+_docker="${_docker:-docker}";				export _docker;
+_docker_exec="${__docker_exec:-$_docker exec -t}";	export _docker_exec;
 
 # die will exit the script with a specific message on stderr and exit code 1 or
 # as specified by the second parameter.
@@ -115,7 +131,7 @@ die() {
 	exit "$code";
 }
 
-# logmsg will print a log message out stdout with a timestamp and possibly a
+# logmsg will print a log message out stderr with a timestamp and possibly a
 # module name.
 logmsg() {
 	local msg="$1";
@@ -124,7 +140,37 @@ logmsg() {
 
 	header="$(date "$DATE_FMT")";
 	[ -n "$mod" ] && header="$header $mod:";
-	[ -t 1 ] && header="\e[36m$header\e[0m";
+	[ -t 2 ] && header="\e[36m$header\e[0m";
+
+	>&2 printf "$header %s\n" "$msg";
+}
+
+# warnmsg will print a log message out stderr with a timestamp and possibly a
+# module name.
+warnmsg() {
+	local msg="$1";
+	local mod="${2:-}";
+	local header="";
+
+	header="$(date "$DATE_FMT") WARN";
+	[ -n "$mod" ] && header="$header $mod";
+	header="${header}:"
+	[ -t 2 ] && header="\e[93m$header\e[0m";
+
+	>&2 printf "$header %s\n" "$msg";
+}
+
+# errmsg will print a log message out stderr with a timestamp and possibly a
+# module name.
+errmsg() {
+	local msg="$1";
+	local mod="${2:-}";
+	local header="";
+
+	header="$(date "$DATE_FMT") ERROR";
+	[ -n "$mod" ] && header="$header $mod";
+	header="${header}:"
+	[ -t 1 ] && header="\e[91m$header\e[0m";
 
 	printf "$header %s\n" "$msg";
 }
@@ -231,6 +277,28 @@ get_dict_key() {
 	return 0;
 }
 
+# get_arr_idx will print the value of the corresponding value from the provided
+# json array at the provided index or will exit with an error if the index is
+# not valid. An empty value is also considered an error even if it's
+# technically valid for a json array to contain it like `["null", "doi", ""]` .
+# Should be executed in a sub-shell, like so:
+#
+#     val="$(get_arr_idx "json_array" "index")"
+#
+get_arr_idx() {
+	set -ue;
+
+	local array="$1";
+	local index="$2";
+	local val="";
+
+	val="$(echo "$array" | $_jq ".[$index]")" || return 1;
+	[ -z "$val" ] && return 1;
+
+	echo "$val";
+	return 0;
+}
+
 # apt_pkg_match returns the string required to install a package via
 # apt/apt-get. This string might contain an exact version using the
 # pkg_name=ver syntax supported by apt/apt-get if the initial dependency
@@ -309,8 +377,10 @@ apt_pkg_match() {
 		return 1;
 	};
 
-	# Pick the newest (highest) version.
-	local _ver_newest="$(
+	# Pick the newest (highest) version. Declare and assign separately to
+	# avoid masking return values (SC2155). 
+	local _ver_newest="";
+	_ver_newest="$(
 		(
 			for v in "${_vers_array[@]}"; do
 				echo "$v";
@@ -377,6 +447,68 @@ mmr_from_str() {
 	meta="$(echo "$ver_str" | sed -E "s/$SEMVER_MATCH/\\7/g")";
 
 	echo "{\"major\": $major, \"minor\": $minor, \"rev\": $rev, \"label\": \"$label\", \"meta\": \"$meta\"}";
+	return 0;
+}
+
+# mmr_date_repl replaces any occurrences {{ .Date.Year }} , {{ .Date.Month }}
+# or {{ .Date.Day }} with their current values as returned by the date command.
+# Should be executed in a sub-shell, like so:
+#
+#     val="$(mmr_date_repl "json_dict")"
+mmr_date_repl() {
+	local v="$1";
+	local major="";
+	local minor="";
+	local rev="";
+	local bugfix="";
+	local label="";
+	local meta="";
+	local year="";
+	local month="";
+	local day="";
+	local result="";
+
+	major="$(get_dict_key "$ver_a" "major" | $_bc)";
+	minor="$(get_dict_key "$ver_a" "minor" | $_bc)";
+	rev="$(get_dict_key "$ver_a" "rev" | $_bc)";
+	bugfix="$(get_dict_key "$ver_a" "bugfix" | $_bc)" || bugfix="";
+	label="$(get_dict_key "$ver_a" "label" || true)";
+	meta="$(get_dict_key "$ver_a" "meta" || true)";
+
+	year="$(date '+%y')";
+	month="$(date '+%m')";
+	day="$(date '+%d')";
+
+	major="$(echo "$major" | sed -E "s/{{ .Date.Year }}/$year/g"	\
+		| sed -E "s/{{ .Date.Month }}/$month/g"			\
+		| sed -E "s/{{ .Date.Day }}/$day/g")";
+	minor="$(echo "$minor" | sed -E "s/{{ .Date.Year }}/$year/g"	\
+		| sed -E "s/{{ .Date.Month }}/$month/g"			\
+		| sed -E "s/{{ .Date.Day }}/$day/g")";
+	rev="$(echo "$rev" | sed -E "s/{{ .Date.Year }}/$year/g"	\
+		| sed -E "s/{{ .Date.Month }}/$month/g"			\
+		| sed -E "s/{{ .Date.Day }}/$day/g")";
+	[ -n "$bugfix" ] && bugfix="$(echo "$bugfix"			\
+		| sed -E "s/{{ .Date.Year }}/$year/g"			\
+		| sed -E "s/{{ .Date.Month }}/$month/g"			\
+		| sed -E "s/{{ .Date.Day }}/$day/g")";
+	[ -n "$label" ] && label="$(echo "$label"			\
+		| sed -E "s/{{ .Date.Year }}/$year/g"			\
+		| sed -E "s/{{ .Date.Month }}/$month/g"			\
+		| sed -E "s/{{ .Date.Day }}/$day/g")";
+	[ -n "$meta" ] && label="$(echo "$meta"				\
+		| sed -E "s/{{ .Date.Year }}/$year/g"			\
+		| sed -E "s/{{ .Date.Month }}/$month/g"			\
+		| sed -E "s/{{ .Date.Day }}/$day/g")";
+
+	echo ", \"label\": \"$label\", \"meta\": \"$meta\"}";
+	result="{\"major\": $major, \"minor\": $minor, \"rev\": $rev";
+	[ -n "$bugfix" ] && result="${result}, \"bugfix\": \"$bugfix\"";
+	[ -n "$label" ] && result="${result}, \"label\": \"$label\"";
+	[ -n "$meta" ] && result="${result}, \"meta\": \"$meta\"";
+	result="${result}}";
+
+	echo "$result";
 	return 0;
 }
 
@@ -531,7 +663,7 @@ aptly_get_latest_rev() {
 	# 19.8-7 or 19.8.7 formats (any combination with or without leading 0
 	# and with - or . preceding the revision).
 	ver_str="$(curl -sS "$repo_url/packages?q=$pkg_name" | $_jq . |	\
-		grep -E " $pkg_name 0?$major\\.0?$minor[\\.-][0-9]{1,3} " |	\
+		grep -E " ${pkg_name} 0?${major}\\.0?${minor}[\\.-][0-9]{1,3} " |	\
 		sort -r | head -n 1 | awk '{print $3;}';)";
 
 	# If $ver_str is empty the package name with major.minor was not found
@@ -550,7 +682,12 @@ aptly_get_latest_rev() {
 # function. Should be called directly (not in a sub-shell), like so:
 #	pkg_serv_template "src.json.tpl" "dst.json"	\
 #		"$service_name"				\
-#		"$service_start_cmd";
+#		"$service_start_cmd"			\
+#		"$package_name"				\
+#		"$srv_restart"				\
+#		"$srv_restart_hold"			\
+#		"$srv_restart_intv"
+#		"$srv_restart_limit";
 pkg_serv_template() {
 	set -eu;
 
@@ -558,10 +695,20 @@ pkg_serv_template() {
 	local dst="${2:-}";
 	local service_name="${3:-}";
 	local service_start_cmd="${4:-}";
+	local package_name="${5:-}";
+	local srv_restart="${6:-on-failure}";
+	local srv_restart_hold="${7:-30000ms}";
+	local srv_restart_intv="${8:-420}";
+	local srv_restart_limit="${9:-3}";
 
 	[ -n "$src" ]			&& cp "$src" "$dst";
 	[ -n "${service_name}" ]	&& sed -i "s/{{ .ServiceName }}/${service_name}/g" "$dst";
 	[ -n "${service_start_cmd}" ]	&& sed -i "s/{{ .ServiceStartCmd }}/${service_start_cmd}/g" "$dst";
+	[ -n "${service_start_cmd}" ]	&& sed -i "s/{{ .PackageName }}/${package_name}/g" "$dst";
+	[ -n "${srv_restart}" ]   	&& sed -i "s/{{ .ServiceRestart }}/${srv_restart}/g" "$dst";
+	[ -n "${srv_restart_hold}" ]   	&& sed -i "s/{{ .ServiceRestartSec }}/${srv_restart_hold}/g" "$dst";
+	[ -n "${srv_restart_intv}" ]   	&& sed -i "s/{{ .StartLimitIntervalSec }}/${srv_restart_intv}/g" "$dst";
+	[ -n "${srv_restart_limit}" ]  	&& sed -i "s/{{ .StartLimitBurst }}/${srv_restart_limit}/g" "$dst";
 
 	# The return code of the function is the return code of the last
 	# command. Above even if we handle `[ -n "${.......}" ]` being false,
@@ -748,6 +895,8 @@ docker_prepare() {
 	local new_conts_network="";
 
 	local apt_resolv_script="jenkins_resolve_apt_dep.sh";
+	local apt_resolv_log="apt_resolv.log";
+	local apt_install_script="jenkins_install_apt_dep.sh";
 
 	if [ -x "./$apt_resolv_script" ]; then
 		apt_resolv_script="./$apt_resolv_script";
@@ -756,15 +905,27 @@ docker_prepare() {
 			apt_resolv_script="${__jenkins_scripts_dir:-./.jenkins}/$apt_resolv_script";
 		fi
 	fi
+	[ -d "${__jenkins_scripts_dir:-./.jenkins}" ]	\
+		&& apt_resolv_log="${__jenkins_scripts_dir:-./.jenkins}/${apt_resolv_log}";
+
+	if [ -x "./$apt_install_script" ]; then
+		apt_install_script="./$apt_install_script";
+	else
+		if [ -x "${__jenkins_scripts_dir:-./.jenkins}/$apt_install_script" ]; then
+			apt_install_script="${__jenkins_scripts_dir:-./.jenkins}/$apt_install_script";
+		fi
+	fi
 
 	# Get build configuration variables.
 	proj="$(get_build_key_or_def "$build_name" "project")";
 
-	# Create a build specific network.
-	new_conts_network="$(echo "${build_job_hash}_${proj}_build_net"	\
-		| sed -E "s/$DOCKER_SANITIZER/_/g")";
-	logmsg "Creating network '$new_conts_network'" "docker_prepare";
-	docker network create --internal --attachable "$new_conts_network";
+	[ "${docker_net_skip:-0}" -ne "1" ] && {
+		# Create a build specific network.
+		new_conts_network="$(echo "${build_job_hash}_${proj}_build_net"	\
+			| sed -E "s/$DOCKER_SANITIZER/_/g")";
+		logmsg "Creating network '$new_conts_network'" "docker_prepare";
+		$_docker network create --internal --attachable "$new_conts_network";
+	}
 
 	# Get the list of containers. We will walk this list multiple times.
 	# This seems slightly inefficient and does make the function longer but
@@ -782,6 +943,7 @@ docker_prepare() {
 		local dckr_rtb_reg="";
 		local cont_image="";
 		local cont_start_cmd="";
+		local cont_is_priviledged="";
 		local image_start_cmd="";
 		local cont_image_info="";
 
@@ -792,6 +954,7 @@ docker_prepare() {
 			| sed -E "s/$DOCKER_SANITIZER/_/g")";
 		cont_image="$(get_dict_key "$cont_conf" "image")";
 		cont_start_cmd="$(get_dict_key "$cont_conf" "start_cmd" || true)";
+		cont_is_priviledged="$(get_dict_key "$cont_conf" "is_priviledged" || true)";
 
 		[ -z "$cont_name" ] && {
 			logmsg "Can't find build container name (list index $i)." \
@@ -813,21 +976,22 @@ docker_prepare() {
 			# shellcheck disable=SC2034
 			dckr_rtb_reg="$($_jq '.auths | keys[]' < "$HOME/.docker/config.json" | grep -E "^$DOCKER_RTB_REGISTRY_URL")" || {
 				# Try to login.
-				docker login -u "$DOCKER_RTB_USERNAME" -p "$DOCKER_RTB_TOKEN" "$DOCKER_RTB_REGISTRY_URL";
+				$_docker login -u "$DOCKER_RTB_USERNAME"	\
+					-p "$DOCKER_RTB_TOKEN" "$DOCKER_RTB_REGISTRY_URL";
 			}
 
 			# If this is an internal registry image always try to update it
 			# before a build. For external images we only try to download it
 			# if the image doesn't already exist. Although for RBFS builds we
 			# we must only use images on the internal docker registry.
-			docker pull "$cont_image";
+			$_docker pull "$cont_image";
 		}
 
-		cont_image_info="$(docker image inspect "$cont_image")" || {
+		cont_image_info="$($_docker image inspect "$cont_image")" || {
 			logmsg "Trying to download container image '$cont_image'" \
 				"docker_prepare";
-			docker pull "$cont_image";
-			cont_image_info="$(docker image inspect "$cont_image")";
+			$_docker pull "$cont_image";
+			cont_image_info="$($_docker image inspect "$cont_image")";
 		};
 
 		# Build the list of arguments for the docker run command.
@@ -838,12 +1002,32 @@ docker_prepare() {
 			"--label" "jenkins_build_proj=$proj"		\
 		);
 
+		[ -n "$cont_is_priviledged" ] && [ "$cont_is_priviledged" == "true" ] && {
+			# Required for docker containers used to build images.
+			# See: https://stackoverflow.com/questions/26406048/debootstrap-inside-a-docker-container#34734556
+			# for a docker mount/chroot/priviledged discussion.
+			# TODO: Investigate podman .
+			dckr_cmd_args+=("--privileged"			\
+				"--cap-add=SYS_ADMIN"			\
+				"--security-opt" "apparmor=unconfined"	\
+				"--security-opt" "seccomp=unconfined"	\
+			);
+		}
+
 		if [ "$global_ssh_agent_fwd" -eq "1" ]; then
 			dckr_cmd_args+=("--label" "ssh_agent_fwd=true"	\
 				"-v" "$SSH_AUTH_SOCK:/ssh-agent-sock"	\
 				"--env" "SSH_AUTH_SOCK=/ssh-agent-sock"	\
 			);
 		fi
+
+		[ -d "$RTB_IMGSTORES_CACHE" ] && {
+			# If a local image store cache exists mount it inside the
+			# container. It might be useful to avoid pulling the same
+			# image multiple times, especially for docker containers
+			# which are used to build images.
+			dckr_cmd_args+=("-v" "$RTB_IMGSTORES_CACHE:$RTB_IMGSTORES_CACHE");
+		}
 
 		dckr_cmd_args+=("-v" "$PWD:/development/$proj"		\
 			"-w" "/development/$proj"			\
@@ -883,15 +1067,15 @@ docker_prepare() {
 		if [ -n "$cont_start_cmd" ]; then
 			# Use the start command provided by the build_step.
 			# shellcheck disable=SC2086
-			docker "${dckr_cmd_args[@]}" $cont_start_cmd;
+			$_docker "${dckr_cmd_args[@]}" $cont_start_cmd;
 		else
 			if [ -n "$image_start_cmd" ]; then
 				# Use the default start command of the image.
-				docker "${dckr_cmd_args[@]}";
+				$_docker "${dckr_cmd_args[@]}";
 			else
 				# Use our custom start command so the container
 				# doesn't exit immediately.
-				docker "${dckr_cmd_args[@]}"	\
+				$_docker "${dckr_cmd_args[@]}"	\
 					/bin/sh -c 'while true; do sleep 300; done';
 			fi
 		fi
@@ -915,7 +1099,7 @@ docker_prepare() {
 		local cont_info="";
 		local cont_status="";
 
-		cont_info="$(docker inspect "$dckr_name")";
+		cont_info="$($_docker inspect "$dckr_name")";
 		cont_status="$(echo "$cont_info" | $_jq ".[0].State.Status"	\
 			| grep -Eiv '^[[:blank:]]*null[[:blank:]]*$')";
 		if [ "_$cont_status" != "_running" ]; then
@@ -944,9 +1128,12 @@ docker_prepare() {
 				| sed -E "s/$DOCKER_SANITIZER/_/g")";
 
 		local cont_deps="";
+		local cont_deps_len="";
 
-		cont_deps="$(get_dict_key "$cont_conf" "deps" || true)";
-		if [ -n "$cont_deps" ]; then
+		cont_deps="$(get_dict_key "$cont_conf" "compile_deps" || true)";
+		[ -z "$cont_deps" ] && cont_deps="[]";
+		cont_deps_len="$(echo "$cont_deps" | $_jq -c '. | values | length')";
+		if [ "$cont_deps_len" -gt "0" ]; then
 			logmsg "Installing dependencies in container '$dckr_name'" \
 				"docker_prepare";
 			# What can happen is a that the current build tries to update
@@ -956,8 +1143,8 @@ docker_prepare() {
 			local _apt_retry_wait="3";
 			local _apt_update_success="0";
 			while [ "$_apt_update_success" -eq "0" ] && [ "$_apt_retries" -gt "0" ]; do
-				docker exec -e "DEBIAN_FRONTEND=noninteractive"	\
-					"$dckr_name"				\
+				$_docker_exec -e "DEBIAN_FRONTEND=noninteractive"	\
+					"$dckr_name"					\
 					apt-get update -qq || {
 					# Update failed.
 					_apt_retries="$(( _apt_retries - 1 ))";
@@ -968,8 +1155,10 @@ docker_prepare() {
 				_apt_update_success="1";
 			done
 
-			[ "$_apt_update_success" -ne "1" ] && \
-				die "APT update failed even after several retries.";
+			[ "$_apt_update_success" -ne "1" ] && { 
+				errmsg "APT update failed even after several retries" "docker_prepare";
+				return 1;
+			}
 
 			declare -a _deps=();
 			local _deps_len="";
@@ -981,23 +1170,34 @@ docker_prepare() {
 				_dep="$(echo "$cont_deps" | $_jq ".[$j]")";
 				# Resolving the exact dependency version needs to happen
 				# inside the respective container.
-				_dep_resolved="$(docker exec						\
+				# NOTE: '$_docker exec' vs '$_docker_exec' is
+				# NOT a mistake here.
+				# shellcheck disable=SC2086
+				_dep_resolved="$($_docker exec						\
 					-e "DEBIAN_FRONTEND=noninteractive"				\
+					-e "BRANCH=$BRANCH"						\
+					-e "BRANCH_SANITIZED=$BRANCH_SANITIZED"				\
 					-e "__jenkins_scripts_dir=${__jenkins_scripts_dir:-./.jenkins}"	\
 					"$dckr_name"							\
-					$apt_resolv_script "$_dep")";
+					$apt_resolv_script "$_dep" "--with-dev")";
 
-				logmsg "Package dependency '$_dep' resolved to '$_dep_resolved'"  "docker_prepare";
+				logmsg "Package dependency '$_dep' resolved to: [$_dep_resolved]"  "docker_prepare";
 
-				_deps+=("$_dep_resolved");
+				# shellcheck disable=SC2206
+				_deps+=($_dep_resolved);
 
 				j="$(( j + 1 ))";
 			done
 
-			docker exec -e "DEBIAN_FRONTEND=noninteractive"				\
+			echo -n "" > "$apt_resolv_log";
+			local d="";
+			for d in "${_deps[@]}"; do
+				echo "$d" >> "$apt_resolv_log";
+			done
+
+			$_docker_exec -e "DEBIAN_FRONTEND=noninteractive"			\
 				"$dckr_name"							\
-				apt-get install -yqq --allow-downgrades --allow-unauthenticated	\
-				"${_deps[@]}";
+				$apt_install_script "${_deps[@]}";
 		fi
 
 		i="$(( i + 1 ))";
@@ -1073,13 +1273,14 @@ docker_prepare() {
 		dckr_name="$( echo "${build_job_hash}_${proj}_${cont_name}"	\
 			| sed -E "s/$DOCKER_SANITIZER/_/g")";
 
-		docker network connect "$new_conts_network" "$dckr_name";
+		[ "${docker_net_skip:-0}" -ne "1" ] &&
+			$_docker network connect "$new_conts_network" "$dckr_name";
 
 		local cont_info="";
 		local cont_addr="";
 		local inspect_path=".[0].NetworkSettings.Networks[\"$new_conts_network\"].IPAddress";
 
-		cont_info="$(docker inspect "$dckr_name")";
+		cont_info="$($_docker inspect "$dckr_name")";
 		cont_addr="$(echo "$cont_info" | $_jq "$inspect_path"	\
 			| grep -Eiv '^[[:blank:]]*null[[:blank:]]*$')";
 		if [ -z "$cont_addr" ]; then
@@ -1108,7 +1309,7 @@ docker_prepare() {
 			| sed -E "s/$DOCKER_SANITIZER/_/g")";
 
 		# shellcheck disable=SC2016
-		docker exec -e "new_conts_hosts=$new_conts_hosts"	\
+		$_docker_exec -e "new_conts_hosts=$new_conts_hosts"	\
 			"$dckr_name"					\
 			/bin/sh -uec 'echo "$new_conts_hosts" >> /etc/hosts';
 
@@ -1158,15 +1359,19 @@ docker_cleanup() {
 		i="$(( i + 1 ))";
 	done
 
-	# Remove the build specific network.
-	new_conts_network="$(echo "${build_job_hash}_${proj}_build_net"	\
-		| sed -E "s/$DOCKER_SANITIZER/_/g")";
-	old_net="$(docker network ls | awk '{print $2;}'	\
-		| grep -E "^${new_conts_network}$" | awk '{print $1;}')";
-	if [ -n "$old_net" ]; then
-		logmsg "Removing network '$new_conts_network'" "docker_cleanup";
-		docker network rm "$new_conts_network";
-	fi
+	[ "${docker_net_skip:-0}" -ne "1" ] && {
+		# Remove the build specific network.
+		new_conts_network="$(echo "${build_job_hash}_${proj}_build_net"	\
+			| sed -E "s/$DOCKER_SANITIZER/_/g")";
+		old_net="$($_docker network ls | awk '{print $2;}'	\
+			| grep -E "^${new_conts_network}$" | awk '{print $1;}')";
+		if [ -n "$old_net" ]; then
+			logmsg "Removing network '$new_conts_network'" "docker_cleanup";
+			$_docker network rm "$new_conts_network";
+		fi
+	}
+
+	return 0;
 }
 
 # docker_remove will stop and delete a container with name. It should be run
@@ -1183,11 +1388,11 @@ docker_remove() {
 
 	# Check if a container with the same name already exists, either running
 	# or stopped.
-	old_cont="$(docker container ls --all | grep -E "${cont_name}$"	\
+	old_cont="$($_docker container ls --all | grep -E "${cont_name}$"	\
 		| awk '{print $1;}')";
 	if [ -n "$old_cont" ]; then
 		logmsg "Stopping container '$dckr_name'" "docker_remove";
-		docker container stop "$old_cont";
+		$_docker container stop "$old_cont";
 		rm_in_progress_delay="5";
 	fi
 	# If the container was created with the --rm option it will be removed
@@ -1195,12 +1400,209 @@ docker_remove() {
 	# However if the container stop command was called it might take a few
 	# seconds to remove the container during which it will return an error.
 	sleep "$rm_in_progress_delay";
-	old_cont="$(docker container ls --all | grep -E "${cont_name}$"	\
+	old_cont="$($_docker container ls --all | grep -E "${cont_name}$"	\
 		| awk '{print $1;}')";
 	if [ -n "$old_cont" ]; then
 		logmsg "Deleting container '$dckr_name'" "docker_remove";
-		docker container rm "$old_cont";
+		$_docker container rm "$old_cont";
 	fi
+}
+
+# prom_init will initialize the Prometheus metrics configuration for the current
+# environment. The metrics configuration is stored in exported environment
+# variables starting with the PROM_ prefix:
+#     - PROM_prefix = ""
+#     - PROM_labels = "" (comma separated list of key="value" pairs)
+#     - PROM_metrics = "" (space separate list of short metric names, the final
+#                          metric names will be $PROM_prefix+($metric_name-$_suffix))
+#     - PROM_labels_${metric_name} = "" (comma separated list of key="value" pairs)
+#     - PROM_hlp_${metric_name} = ""
+#     - PROM_typ_${metric_name} = ""
+#     - PROM_val_${metric_name} = ""
+#
+#     Individual metric names must have a _suffix that will be stripped when
+#     pushing the metric.
+#
+# prom_init should be called like this:
+#     prom_init "prefix" "labels"
+#
+# If prom_init() is called a second time it will fail.
+prom_init() {
+	local prefix="$1";
+	local labels="$2";
+	local pushgw="${3:-$PROM_PUSH_GW}";
+	local curllog="${4:-$PROM_CURL_LOG}";
+
+	# Fail if prom_init was called before.
+	[ -n "${PROM_prefix:-}" ] && return 1;
+
+	local h="";
+	h="$($_hostname --fqdn || true)";
+	[ -z "$h" ] || [ "_$h" == "_localhost" ] || [ "_$h" == "_local" ] && {
+		h="$HOSTNAME";
+	}
+
+	PROM_prefix="$prefix";
+	PROM_labels="job=\"$prefix\", instance=\"\", host=\"$h\"";
+	[ -n "$labels" ] && PROM_labels="${PROM_labels}, $labels";
+	PROM_metrics="";
+	PROM_pushgateway="$pushgw";
+	PROM_curl_log="$curllog";
+
+	export PROM_prefix;
+	export PROM_labels;
+	export PROM_metrics;
+	export PROM_pushgateway;
+	export PROM_curl_log;
+}
+
+prom_add() {
+	local metric_name="$1";
+	local hlp="$2";
+	local typ="$3";
+	local labels="$4";
+
+	# Fail if prom_init was never called.
+	[ -z "${PROM_prefix:-}" ] && return 1;
+
+	# Fail if this particular metric was added before.
+	local existing_typ="";
+	eval existing_typ="\${PROM_typ_$metric_name:-}";
+	[ -n "$existing_typ" ] && return 2;
+
+	eval "PROM_labels_${metric_name}='$labels';";
+	eval "PROM_hlp_${metric_name}='$hlp';"
+	eval "PROM_typ_${metric_name}='$typ';"
+	eval "PROM_val_${metric_name}='';";
+
+	eval "export PROM_labels_${metric_name};";
+	eval "export PROM_hlp_${metric_name};";
+	eval "export PROM_typ_${metric_name};";
+	eval "export PROM_val_${metric_name};";
+
+	PROM_metrics="$PROM_metrics $metric_name";
+	export PROM_metrics;
+}
+
+prom_set() {
+	local metric_name="$1";
+	local val="$2";
+
+	# Fail if prom_init was never called.
+	[ -z "${PROM_prefix:-}" ] && return 1;
+
+	# Fail if this particular metric was added before.
+	local existing_typ="";
+	eval existing_typ="\${PROM_typ_$metric_name:-}";
+	[ -z "$existing_typ" ] && return 2;
+
+	eval "PROM_val_${metric_name}='$val';";
+
+	eval "export PROM_val_${metric_name};";
+}
+
+prom_add_duration() {
+	local metric_name="$1";
+	local hlp="$2";
+	local labels="$3";
+	local init="$4";
+
+	# Fail if prom_init was never called.
+	[ -z "${PROM_prefix:-}" ] && return 1;
+
+	[ -z "$init" ] && init="$(date '+%s')";
+
+	# Fail if this particular metric was added before.
+	local existing_typ="";
+	eval existing_typ="\${PROM_typ_$metric_name:-}";
+	[ -n "$existing_typ" ] && return 2;
+
+	eval "PROM_labels_${metric_name}='$labels';";
+	eval "PROM_hlp_${metric_name}='$hlp';"
+	eval "PROM_typ_${metric_name}='gauge';"
+	eval "PROM_init_${metric_name}='$init';";
+	eval "PROM_last_${metric_name}='$init';";
+	eval "PROM_val_${metric_name}='0';";
+
+	eval "export PROM_labels_${metric_name};";
+	eval "export PROM_hlp_${metric_name};";
+	eval "export PROM_typ_${metric_name};";
+	eval "export PROM_init_${metric_name};";
+	eval "export PROM_last_${metric_name};";
+	eval "export PROM_val_${metric_name};";
+
+	PROM_metrics="$PROM_metrics $metric_name";
+	export PROM_metrics;
+}
+
+prom_update_duration() {
+	local metric_name="$1";
+
+	# Fail if prom_init was never called.
+	[ -z "${PROM_prefix:-}" ] && return 1;
+
+	# Fail if this particular metric was added before.
+	local existing_typ="";
+	eval existing_typ="\${PROM_typ_$metric_name:-}";
+	[ -z "$existing_typ" ] && return 2;
+
+	local init="";
+	eval init="\${PROM_init_$metric_name:-}";
+	[ -z "$init" ] && return 3;
+
+	local now=""; now="$(date '+%s')";
+	local val=""; val="$(( now - init ))";
+
+	eval "PROM_last_${metric_name}='$now';";
+	eval "PROM_val_${metric_name}='$val';";
+
+	eval "export PROM_last_${metric_name};";
+	eval "export PROM_val_${metric_name};";
+}
+
+prom_gather() {
+	# Fail if prom_init was never called.
+	[ -z "${PROM_prefix:-}" ] && return 1;
+
+	local m="";
+	local real_name="";
+	local labels="";
+	local typ="";
+	local hlp="";
+	local val="";
+	local hlp_typ_printed="";
+	for m in $PROM_metrics; do
+		real_name="${PROM_prefix}_$(echo "$m" | sed -E 's/^(.*)_([^_]+)$/\1/g')";
+		eval labels="\${PROM_labels_$m}";
+		eval typ="\${PROM_typ_$m}";
+		eval hlp="\${PROM_hlp_$m}";
+		eval val="\${PROM_val_$m}";
+
+		if [ -z "$labels" ]; then
+			labels="$PROM_labels";
+		else
+			labels="${PROM_labels}, ${labels}";
+		fi
+
+		echo "$hlp_typ_printed" | grep "$real_name" 2>/dev/null 1>/dev/null || {
+			hlp_typ_printed="$hlp_typ_printed $real_name"
+			printf "# HELP %s %s\n" "$real_name" "$hlp";
+			printf "# TYPE %s %s\n" "$real_name" "$typ";
+		}
+		printf "%s{%s} %s\n" "$real_name" "$labels" "$val";
+		printf "\n";
+	done
+}
+
+prom_push() {
+	local instance="${1:-}";
+	local url="$PROM_pushgateway/job/$PROM_prefix";
+
+	[ -n "$instance" ] && url="$url/instance/$instance";
+
+	prom_gather | $_curl -fSL --data-binary @- "$url"		\
+		2>> "${PROM_curl_log}.err" 1>> "${PROM_curl_log}.log"	\
+		|| errmsg "Failed to push Prometheus metrics" "prom_push";
 }
 
 # Sentinel function to verify that this file is actually loaded successfully in

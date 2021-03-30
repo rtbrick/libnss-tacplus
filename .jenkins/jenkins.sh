@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 
 # jenkins.sh is the entry point of any Jenkins build job. The build job is
-# (roughly) composed of 3 steps:
+# (roughly) composed of 4 high level steps:
 #     - build
 #     - package
+#     - test
 #     - upload
+# (although the test high level step is rarely used).
 #
 # jenkins.sh uses the $build_conf JSON file (which by default is
 # .jenkins/jenkins_build_conf.json) to find out the config information for
 # different builds (like master vs. development build or 14.04 vs. 18.04 build)
 # and for each of the build configs included it in the JSON file it should find
-# the shell commands or scripts for each of the 3 steps described above:
-#     - ["build_name"]["build_cmd"]
-#     - ["build_name"]["pkg_cmd"]
-#     - ["build_name"]["upload_cmd"]
+# the shell scripts and/or list of commands for each of the 4 steps described
+# above:
+#     - ["build_name"]["build_script"]
+#     - ["build_name"]["pkg_script"]
+#     - ["build_name"]["test_script"]
+#     - ["build_name"]["upload_script"]
+# AND/OR:
+#     - ["build_name"]["build_commands"]: [ "shell cmd 1", "shell cmd 2", "shell cmd 3" ]
 #
 # More details about the expected structure of the $build_conf JSON file are
 # included as comments in the actual JSON file.
@@ -21,11 +27,12 @@
 # If for a specific step there is only a command or a few simple commands they
 # can be included in the $build_conf JSON file directly, or a complex script
 # can be created and included in the $build_conf JSON as
-# ".jenkins/jenkins_step_script.sh".
+# ".jenkins/jenkins_step_name_of_specific_script.sh".
 #
 # If for a specific step we have a standalone script it should be named:
 #     - jenkins_build_.....sh
 #     - jenkins_package_....sh
+#     - jenkins_test_....sh
 #     - jenkins_upload_.....sh
 #
 # For different build configs (like master vs. development) we can have
@@ -77,9 +84,64 @@ jenkins_shell_functions_loaded;
 # command which errored. The trap_debug function is defined in
 # jenkins_shell_functions.sh. errtrace is bash specific.
 [ "${BASH_VERSION:-0}" != "0" ] && set -o errtrace;
-trap 'trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
+# Since the script will exit at the first error try and print details about the
+# command which errored.
+custom_trap_debug() {
+	local rc="$1";
+	local cmd="$2";
+	local lineno="$3";
+	local file="$4";
+	local header="";
+
+	header="$(date "$DATE_FMT") ERROR:";
+	[ -t 2 ] && header="\e[91m$header\e[0m";
+
+	>&2 printf "%s command '%s' failed with exit code %d at line %d in %s\n" \
+		"$header" "$cmd" "$rc" "$lineno" "$file";
+
+	prom_set "success_job" "0" || true;
+	prom_update_duration "duration_total" || true;
+	>&2 printf "%s Trying to push Prometheus metrics\n" "$header";
+	prom_push "${proj:-}" || true;
+
+	[ "${keep_containers:-0}" -ne "1" ] && {
+		prom_add_duration "duration_cleanup" "Duration of the cleanup step in seconds."	\
+			"step=\"cleanup\"" "" || true;
+		>&2 printf "%s Trying to cleanup docker containers and networks\n"	\
+			"$header";
+		docker_cleanup "$build_name" "$build_job_hash" || true;
+		prom_update_duration "duration_cleanup" || true;
+		prom_set "success_job" "0" || true;
+		prom_update_duration "duration_total" || true;
+		prom_push "${proj:-}" || true;
+	}
+
+	return "$rc";
+}
+trap 'custom_trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
+
+# Dependencies on other programs which might not be installed. If any of these
+# are missing the script will exit here with an error. Can also rely on values
+# discovered and set in jenkins_shell_functions.
+_git="$_git";
+_jq="$_jq";
+_sha256sum="$_sha256sum";
+
+# Prefer podman over docker if available.
+_docker="$(which podman)" || _docker="$(which docker)";	export _docker;
+_docker_exec="$_docker exec -t";			export _docker_exec;
 
 # Global variables.
+# DEFAULT_BUILD_SCRIPT is the script used when a build step (inside of a
+# container does not have a specific value for build_script.
+DEFAULT_BUILD_SCRIPT="${__jenkins_scripts_dir:-./.jenkins}/jenkins_build.sh";
+DEFAULT_PKG_SCRIPT="${__jenkins_scripts_dir:-./.jenkins}/jenkins_package.sh";
+#
+# DEFAULT_STEP_CONT defines the default container name in which steps like
+# package, test, upload will run if a specific container for them is not
+# defined in build_conf through a variable like `pkg_cont`.
+DEFAULT_STEP_CONT="builder";
+# 
 # build_conf is the JSON file describing the build. It has a default value but
 # it can also be provided via the -C CLI option.
 build_conf="${__jenkins_scripts_dir:-./.jenkins}/jenkins_build_conf.json";
@@ -95,14 +157,14 @@ highlevel_step="";			# The high level step to run. It can be either
 					# will be executed.
 cleanup_hash="";			# build_job_hash used to identify docker containers
 					# to cleanup.
-keep_failed="";				# Docker containers and networks are cleaned up automatically
+keep_containers="";			# Docker containers and networks are cleaned up automatically
 					# even for failed builds. If this is set then keep them after
 					# a failed build for troubleshooting.
 local_build="";				# If this is set via the -L CLI option
 					# vars expected from Jenkins are calculated
 					# locally and the DEB package is not uploaded.
 docker_net_skip="";			# Skip configuring docker networks for containers.
-upload_force="";			# Force the upload of the resulting package
+upload_force="0";			# Force the upload of the resulting package
 					# even if this is a local build.
 ssh_agent_fwd="0";			# Forward the local SSH Agent inside all containers.
 __global_debug="0";			# Debug flag. Can be specified multiple times.
@@ -122,7 +184,7 @@ print_usage() {
 	printf "\t-S build_step\tRun only one of the build steps. Default is to run all build steps.\n";
 	printf "\t\t\tNote that all the containers are still started even if build_step is specified\n";
 	printf "\t\t\tas they might provide some ancillary services (like a database server).\n";
-	printf "\t-T step\t\tRun only one of the 3 high level steps: build, package or upload. Default is to run all 3.\n";
+	printf "\t-T step\t\tRun only one of the 4 high level steps: build, package, test or upload. Default is to run all 4.\n";
 	printf "\t-N build_job_hash\tCleanup an existing set of docker containers left over from a previous (failed) build.\n";
 	printf "\t-K\t\tKeep failed. Docker containers and networks are cleaned up automatically even for failed builds. If this is set then keep them after a failed build for troubleshooting.\n";
 	printf "\t-O\t\tSkip configuring docker networks for the spawned containers.\n";
@@ -157,7 +219,7 @@ while [ $# -ne 0 ]; do
 		-N)
 			cleanup_hash="$2"; shift; shift;;
 		-K)
-			keep_failed="1"; shift;;
+			keep_containers="1"; shift;;
 		-O)
 			docker_net_skip="1"; shift;;
 		-S)
@@ -250,6 +312,8 @@ get_conf_key "$build_name" 1>/dev/null || {
 		build)
 			;;
 		package)
+			;;
+		test)
 			;;
 		upload)
 			;;
@@ -351,6 +415,7 @@ fi
 if [ -z "$BRANCH" ] || [ -z "$GIT_COMMIT" ]; then
 	die "Unknown state of git repository";
 fi
+BRANCH_SANITIZED="$BRANCH"; export BRANCH_SANITIZED;
 GIT_COMMIT_TS="$($_git show --no-patch '--format=%ct' "$GIT_COMMIT")"; export GIT_COMMIT_TS;
 GIT_COMMIT_DATE="$(timestamp_format "$GIT_COMMIT_TS")"; export GIT_COMMIT_DATE;
 _git_commit_subj="$($_git show --no-patch '--format=%s' "$GIT_COMMIT")";
@@ -365,6 +430,16 @@ ver_mmr="$(get_build_key_or_def "$build_name" "version_mmr")";
 ver_str="$(mmr_to_str "$ver_mmr")";
 [ -z "$ver_str" ] && die "Something went wrong regarding versions";
 
+# Initialize Prometheus metrics.
+prom_init "jenkins_build_job" "project=\"$proj\", build_name=\"$build_name\", branch=\"$BRANCH\"";
+prom_add "success_job" "Whether the job finished successfully or not (1 for success, 0 for error)." "gauge" "";
+prom_set "success_job" "0";
+prom_add "start_time_job" "UNIX timestamp of job start." "counter" "";
+prom_set "start_time_job" "$build_ts";
+prom_add "end_time_job" "UNIX timestamp of job start." "counter" "";
+prom_set "end_time_job" "0";
+prom_add_duration "duration_total" "Duration of the job (either either job or part of it) in seconds." "step=\"total\"" "$build_ts";
+
 # Get the latest tag that contains a SEMVER 2.0 version string.
 tag_mmr="$(git_latest_tag_mmr)";
 
@@ -377,7 +452,7 @@ if [ -z "$local_build" ] && [ "$BRANCH" == "master" ]; then
 		if [ -n "$tag_mmr" ] && mmr_compare "$ver_mmr" "$tag_mmr"; then
 			logmsg "Found matching tag: $tag_mmr" "$ME";
 		else
-			logmsg "ERROR: tag version: $tag_mmr != build config version: $ver_mmr";
+			errmsg "tag version: $tag_mmr != build config version: $ver_mmr";
 			echo "While building from master branch we must have a tag";
 			echo "containing the same version as the one specified in the";
 			echo "build config file ($build_conf).";
@@ -414,6 +489,9 @@ else
 	# Debian package versioning restrictions: https://www.debian.org/doc/debian-policy/ch-controlfields.html#version
 	# (see the subsection titled "https://www.debian.org/doc/debian-policy/ch-controlfields.html#version").
 	_branch_sanitized="$(echo "$BRANCH" | sed -E 's/[^[[:alnum:]]]?//g')";
+	# Export the value so it can be re-used in later scripts.
+	BRANCH_SANITIZED="$_branch_sanitized"; export BRANCH_SANITIZED;
+
 	if [ "${gitlabMergeRequestIid:-0}" -ne "0" ]; then
 		_new_meta="B${_branch_sanitized}.MR${gitlabMergeRequestIid}.C${_short_commit}";
 	else
@@ -442,10 +520,14 @@ logmsg "Running for project: ${proj}; build_name: ${build_name}; version: ${ver_
 # Prepare the build envoironment which can be composed of one or more docker
 # containers.
 logmsg "Launching docker container(s) for this build ..." "$ME";
+prom_add_duration "duration_prepare" "Duration of the prepare step in seconds." "step=\"prepare\"" "";
 docker_prepare "$build_name" "$build_job_hash" "$ssh_agent_fwd";
+prom_update_duration "duration_prepare";
 
-# Get build steps from the configuration and run any of them which have a
-# build_cmd or a single one.
+prom_add_duration "duration_build" "Duration of the build step in seconds." "step=\"build\"" "";
+# Get build steps. Based on the build_name containers configuration we consider
+# a valid build step any container which has a non-empty build_script or
+# build_commands setting.
 build_steps="$(get_build_key_or_def "$build_name" "containers")";
 build_steps_len="$(echo "$build_steps" | $_jq -c '. | values | length')";
 skip_build_steps="0";
@@ -459,22 +541,47 @@ while [ "$i" -lt "$build_steps_len" ] && [ "$skip_build_steps" -eq "0" ]; do
 	cont_conf="";
 	cont_name="";
 	dckr_name="";
-	build_cmd="";
+	build_script="";
+	build_commands="";
 
 	cont_conf="$(echo "$build_steps" | $_jq -c ". | values | .[$i]"	\
 		| grep -Eiv '^[[:blank:]]*null[[:blank:]]*$')";
 	cont_name="$(get_dict_key "$cont_conf" "name")";
 	dckr_name="$( echo "${build_job_hash}_${proj}_${cont_name}"	\
 		| sed -E "s/$DOCKER_SANITIZER/_/g")";
-	build_cmd="$(get_dict_key "$cont_conf" "build_cmd" || true)";
 
-	# Run the build step.
-	if [ -n "$build_cmd" ]; then
-		logmsg "Running build step '$cont_name' build command '$build_cmd'" "$ME";
-		docker exec						\
+	# Both build_script and build_commands can be undefined for the current
+	# container (build step). 
+	build_script="$(get_dict_key "$cont_conf" "build_script" || true)";
+	build_commands="$(get_dict_key "$cont_conf" "build_commands" || true)";
+	# If build_commands is not defined default to an empty list.
+	[ -z "$build_commands" ] && build_commands="[]";
+
+	# If build_commands is defined in the build configuration and is really
+	# a non-empty list we need to verify the build_script or provide a
+	# default value.
+	[ -n "$build_commands" ] && {
+		build_commands_len="$(echo "$build_commands" | $_jq -c '. | values | length')";
+		[ "$build_commands_len" -gt "0" ] && [ -z "$build_script" ] && {
+			build_script="$DEFAULT_BUILD_SCRIPT";
+		}
+
+		[ "$build_commands_len" -gt "0" ] && [ ! -x "$build_script" ] && {
+			die "Build script '$build_script' does not exist or is not executable";
+		}
+	}
+
+	# Run the script for the current build step. We'll execute this either
+	# because build_script was defined in the configuration in the first
+	# place or because build_script was not defined but build_commands
+	# was defined and a non-empty list.
+	if [ -n "$build_script" ]; then
+		logmsg "Running build step inside container '$cont_name' with build script '$build_script'" "$ME";
+		$_docker_exec						\
 			-e "build_name=$build_name"			\
 			-e "build_conf=$build_conf"			\
 			-e "build_step=$cont_name"			\
+			-e "build_commands=$build_commands"		\
 			-e "dckr_name=$dckr_name"			\
 			-e "local_build=$local_build"			\
 			-e "proj=$proj"					\
@@ -484,36 +591,112 @@ while [ "$i" -lt "$build_steps_len" ] && [ "$skip_build_steps" -eq "0" ]; do
 			-e "ver_str=$ver_str"				\
 			-e "__global_debug=$__global_debug"		\
 			-e "BRANCH=$BRANCH"				\
+			-e "BRANCH_SANITIZED=$BRANCH_SANITIZED"		\
 			-e "GIT_COMMIT=$GIT_COMMIT"			\
 			-e "GIT_COMMIT_TS=$GIT_COMMIT_TS"		\
 			-e "GIT_COMMIT_DATE=$GIT_COMMIT_DATE"		\
 			"$dckr_name"					\
-			/bin/sh -c -- "$build_cmd";
+			/bin/sh -c -- "$build_script";
 	else
-		logmsg "build_cmd is empty, skipping build step '$cont_name'" "$ME";
+		logmsg "Both build_script and build_commands are empty, skipping build step '$cont_name'" "$ME";
 	fi
 
 	i="$(( i + 1 ))";
 done
+prom_update_duration "duration_build";
 
-# Get packaging configuration variables.
-pkg_cont="$(get_build_key_or_def "$build_name" "pkg_cont")";
-pkg_name="$(get_build_key_or_def "$build_name" "pkg_name")";
-pkg_descr="$(get_build_key_or_def "$build_name" "pkg_descr")";
-pkg_group="$(get_build_key_or_def "$build_name" "pkg_group")";
-pkg_deps="$(get_build_key_or_def "$build_name" "pkg_deps")";
-pkg_services="$(get_build_key_or_def "$build_name" "pkg_services" || true)";
-pkg_sw_ver_skip="$(get_build_key_or_def "$build_name" "pkg_sw_ver_skip" || true)";
-pkg_cmd="$(get_build_key_or_def "$build_name" "pkg_cmd" || true)";
+prom_add_duration "duration_pkg" "Duration of the pkg step in seconds." "step=\"pkg\"" "";
+for pkg_suffix in "" "dev" "dbg"; do
+	# Get packaging configuration variables.
+	conf_key="pkg_script"; [ -n "$pkg_suffix" ] && conf_key="pkg_${pkg_suffix}_script";
+	pkg_script="$(get_build_key_or_def "$build_name" "$conf_key" || true)";
+	conf_key="pkg_commands"; [ -n "$pkg_suffix" ] && conf_key="pkg_${pkg_suffix}_commands";
+	pkg_commands="$(get_build_key_or_def "$build_name" "$conf_key" || true)";
+	# If pkg_commands is not defined default to an empty list.
+	[ -z "$pkg_commands" ] && pkg_commands="[]";
 
-# Run the packaging step.
-if [ -n "$pkg_cmd" ]; then
-	if [ -z "$highlevel_step" ] || [ "_$highlevel_step" == "_package" ]; then
-		dckr_name="$( echo "${build_job_hash}_${proj}_${pkg_cont}"	\
+	# If pkg_commands is defined in the build configuration and is really
+	# a non-empty list we need to verify the pkg_script or provide a
+	# default value.
+	[ -n "$pkg_commands" ] && {
+		pkg_commands_len="$(echo "$pkg_commands" | $_jq -c '. | values | length')";
+		[ "$pkg_commands_len" -gt "0" ] && [ -z "$pkg_script" ] && {
+			pkg_script="$DEFAULT_PKG_SCRIPT";
+		}
+
+		[ "$pkg_commands_len" -gt "0" ] && [ ! -x "$pkg_script" ] && {
+			die "Package script '$pkg_script' does not exist or is not executable";
+		}
+	}
+
+	# Run the packaging step.
+	if [ -n "$pkg_script" ]; then
+		if [ -z "$highlevel_step" ] || [ "_$highlevel_step" == "_package" ]; then
+			# Get more packaging configuration variables.
+			pkg_cont="$(get_build_key_or_def "$build_name" "pkg_cont" || true)";
+			[ -z "$pkg_cont" ] && pkg_cont="$DEFAULT_STEP_CONT";
+			pkg_name="$(get_build_key_or_def "$build_name" "pkg_name")";
+			pkg_descr="$(get_build_key_or_def "$build_name" "pkg_descr")";
+			pkg_group="$(get_build_key_or_def "$build_name" "pkg_group")";
+			pkg_deps="$(get_build_key_or_def "$build_name" "pkg_deps")";
+			pkg_deps_exact="$(get_build_key_or_def "$build_name" "pkg_deps_exact" || true)";
+			pkg_services="$(get_build_key_or_def "$build_name" "pkg_services" || true)";
+			pkg_sw_ver_skip="$(get_build_key_or_def "$build_name" "pkg_sw_ver_skip" || true)";
+
+			dckr_name="$( echo "${build_job_hash}_${proj}_${pkg_cont}"	\
+				| sed -E "s/$DOCKER_SANITIZER/_/g")";
+
+			logmsg "Running pkg step inside container '$dckr_name' with pkg script '$pkg_script'" "$ME";
+			$_docker_exec						\
+				-e "build_name=$build_name"			\
+				-e "build_conf=$build_conf"			\
+				-e "dckr_name=$dckr_name"			\
+				-e "local_build=$local_build"			\
+				-e "proj=$proj"					\
+				-e "build_ts=$build_ts"				\
+				-e "build_date=$build_date"			\
+				-e "build_job_hash=$build_job_hash"		\
+				-e "pkg_name=$pkg_name"				\
+				-e "pkg_suffix=$pkg_suffix"			\
+				-e "pkg_descr=$pkg_descr"			\
+				-e "pkg_group=$pkg_group"			\
+				-e "pkg_deps=$pkg_deps"				\
+				-e "pkg_deps_exact=$pkg_deps_exact"		\
+				-e "pkg_services=$pkg_services"			\
+				-e "pkg_sw_ver_skip=$pkg_sw_ver_skip"		\
+				-e "pkg_commands=$pkg_commands"			\
+				-e "ver_mmr=$ver_mmr"				\
+				-e "ver_str=$ver_str"				\
+				-e "__global_debug=$__global_debug"		\
+				-e "BRANCH=$BRANCH"				\
+				-e "GIT_COMMIT=$GIT_COMMIT"			\
+				-e "GIT_COMMIT_TS=$GIT_COMMIT_TS"		\
+				-e "GIT_COMMIT_DATE=$GIT_COMMIT_DATE"		\
+				"$dckr_name"					\
+				/bin/sh -c -- "$pkg_script";
+		else
+			logmsg "Skipping package high level step" "$ME";
+		fi
+	else
+		logmsg "pkg_script is empty, skipping package step" "$ME";
+	fi
+done
+prom_update_duration "duration_pkg";
+
+prom_add_duration "duration_test" "Duration of the test step in seconds." "step=\"test\"" "";
+# Get test configuration variables.
+test_cont="$(get_build_key_or_def "$build_name" "test_cont" || true)";
+[ -z "$test_cont" ] && test_cont="$DEFAULT_STEP_CONT";
+test_script="$(get_build_key_or_def "$build_name" "test_script" || true)";
+
+# Run the test step.
+if [ -n "$test_script" ]; then
+	if [ -z "$highlevel_step" ] || [ "_$highlevel_step" == "_test" ]; then
+		dckr_name="$( echo "${build_job_hash}_${proj}_${test_cont}"	\
 			| sed -E "s/$DOCKER_SANITIZER/_/g")";
 
-		logmsg "Running the package step inside container '$dckr_name' ..." "$ME";
-		docker exec						\
+		logmsg "Running test step inside container '$dckr_name' with test script '$test_script'" "$ME";
+		$_docker_exec						\
 			-e "build_name=$build_name"			\
 			-e "build_conf=$build_conf"			\
 			-e "dckr_name=$dckr_name"			\
@@ -522,11 +705,6 @@ if [ -n "$pkg_cmd" ]; then
 			-e "build_ts=$build_ts"				\
 			-e "build_date=$build_date"			\
 			-e "build_job_hash=$build_job_hash"		\
-			-e "pkg_name=$pkg_name"				\
-			-e "pkg_descr=$pkg_descr"			\
-			-e "pkg_group=$pkg_group"			\
-			-e "pkg_deps=$pkg_deps"				\
-			-e "pkg_services=$pkg_services"			\
 			-e "ver_mmr=$ver_mmr"				\
 			-e "ver_str=$ver_str"				\
 			-e "__global_debug=$__global_debug"		\
@@ -535,51 +713,66 @@ if [ -n "$pkg_cmd" ]; then
 			-e "GIT_COMMIT_TS=$GIT_COMMIT_TS"		\
 			-e "GIT_COMMIT_DATE=$GIT_COMMIT_DATE"		\
 			"$dckr_name"					\
-			/bin/sh -c -- "$pkg_cmd";
+			/bin/sh -c -- "$test_script";
 	else
-		logmsg "Skipping package high level step" "$ME";
+		logmsg "Skipping test high level step" "$ME";
 	fi
 else
-	logmsg "pkg_cmd is empty, skipping package step" "$ME";
+	logmsg "test_script is empty, skipping test step" "$ME";
 fi
+prom_update_duration "duration_test";
 
-upload_cmd="$(get_build_key_or_def "$build_name" "upload_cmd" || true)";
+prom_add_duration "duration_upload" "Duration of the upload step in seconds." "step=\"upload\"" "";
+# Get upload configuration variables.
+upload_script="$(get_build_key_or_def "$build_name" "upload_script" || true)";
+upload_cont="$(get_build_key_or_def "$build_name" "upload_cont" || true)";
+[ -z "$upload_cont" ] && upload_cont="$DEFAULT_STEP_CONT";
 
 # Run the upload step.
-if [ -n "$upload_cmd" ]; then
+if [ -n "$upload_script" ]; then
 	if [ -z "$highlevel_step" ] || [ "_$highlevel_step" == "_package" ]; then
 		# Only run the upload step if this is a Jenkins build, not a
 		# local one.
 		if [ -z "$local_build" ] || [ "$upload_force" -eq "1" ]; then
-			logmsg "Running the upload step ..." "$ME";
-			/usr/bin/env					\
-				"build_name=$build_name"		\
-				"build_conf=$build_conf"		\
-				"local_build=$local_build"		\
-				"proj=$proj"				\
-				"build_ts=$build_ts"			\
-				"build_date=$build_date"		\
-				"build_job_hash=$build_job_hash"	\
-				"pkg_name=$pkg_name"			\
-				"pkg_descr=$pkg_descr"			\
-				"pkg_group=$pkg_group"			\
-				"pkg_deps=$pkg_deps"			\
-				"pkg_services=$pkg_services"		\
-				"ver_mmr=$ver_mmr"			\
-				"ver_str=$ver_str"			\
-				"__global_debug=$__global_debug"	\
-				"BRANCH=$BRANCH"			\
-				"GIT_COMMIT=$GIT_COMMIT"		\
-				"GIT_COMMIT_TS=$GIT_COMMIT_TS"		\
-				"GIT_COMMIT_DATE=$GIT_COMMIT_DATE"	\
-				/bin/sh -c -- "$upload_cmd";
+			dckr_name="$( echo "${build_job_hash}_${proj}_${upload_cont}"	\
+				| sed -E "s/$DOCKER_SANITIZER/_/g")";
+
+			logmsg "Running upload step inside container '$dckr_name' with upload script '$upload_script'" "$ME";
+			$_docker_exec					\
+				-e "build_name=$build_name"		\
+				-e "build_conf=$build_conf"		\
+				-e "local_build=$local_build"		\
+				-e "proj=$proj"				\
+				-e "build_ts=$build_ts"			\
+				-e "build_date=$build_date"		\
+				-e "build_job_hash=$build_job_hash"	\
+				-e "ver_mmr=$ver_mmr"			\
+				-e "ver_str=$ver_str"			\
+				-e "__global_debug=$__global_debug"	\
+				-e "BRANCH=$BRANCH"			\
+				-e "GIT_COMMIT=$GIT_COMMIT"		\
+				-e "GIT_COMMIT_TS=$GIT_COMMIT_TS"	\
+				-e "GIT_COMMIT_DATE=$GIT_COMMIT_DATE"	\
+				"$dckr_name"				\
+				/bin/sh -c -- "$upload_script";
 		fi
 	else
 		logmsg "Skipping upload step" "$ME";
 	fi
 else
-	logmsg "upload_cmd is empty, skipping upload step" "$ME";
+	logmsg "upload_script is empty, skipping upload step" "$ME";
 fi
+prom_update_duration "duration_upload";
 
-logmsg "All steps finished without errors, removing docker container(s)" "$ME";
-docker_cleanup "$build_name" "$build_job_hash";
+[ "${keep_containers:-0}" -ne "1" ] && {
+	prom_add_duration "duration_cleanup" "Duration of the cleanup step in seconds." "step=\"cleanup\"" "";
+	logmsg "All steps finished without errors, removing docker container(s)" "$ME";
+	docker_cleanup "$build_name" "$build_job_hash";
+	prom_update_duration "duration_cleanup";
+}
+
+prom_set "end_time_job" "$(date '+%s')";
+prom_update_duration "duration_total";
+prom_set "success_job" "1";
+prom_push "$proj";
+logmsg "Prometheus metrics pushed" "$ME";

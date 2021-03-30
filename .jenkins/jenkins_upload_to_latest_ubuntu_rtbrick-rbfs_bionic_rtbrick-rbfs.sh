@@ -44,11 +44,10 @@ trap 'trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
 }
 
 # Dependencies on other programs which might not be installed. If any of these
-# are missing the script will exit here with an error.
-# The curl version on Ubuntu 16.04 (xenial) doesn't support --fail-early, we
-# need to change this back once we upgrade.
-# _curl="$(which curl) --fail --fail-early --silent --show-error";
-_curl="$(which curl) --fail --silent --show-error";
+# are missing the script will exit here with an error. We can also rely on
+# values discovered and exporter by jenkins_shell_functions .
+_jq="$(which jq) -er --monochrome-output";
+_curl="$(which curl) -fsSL";
 
 ME="jenkins_upload_to_latest_ubuntu_rtbrick-rbfs_bionic_rtbrick-rbfs.sh";	# Useful for log messages.
 
@@ -57,24 +56,71 @@ PUBLISH_PATH="latest/ubuntu/rtbrick-rbfs";
 # https://github.com/aptly-dev/aptly/blob/master/api/publish.go#L44
 PUBLISH_PATH_ESCAPED="latest_ubuntu_rtbrick-rbfs";
 
-APTLY_API_URL="http://pkg.rtbrick.net/aptly-api";
+APTLY_API_URL="https://pkg.rtbrick.net/aptly-api";
 APTLY_API_USER="abjibdevak";
 APTLY_API_PASS="ciljOncukmerkyoythiripderm4Opam-";
 
 # shellcheck disable=SC2012
-_newest_deb="$(ls -t ./*.deb | head -n 1)";
+_deb="$(ls -t ./*.deb | grep -E -v '^.\/rtbrick.*-(dev|dbg)_' | head -n 1)";
 
 # TODO: Due to the fact that the aptly api returns "200 OK" even in case of
 # errors or problems curl will also return exit code 0 (success). In order to
 # detect a problem we need to inspect the returned JSON.
-logmsg "Trying to upload package ${_newest_deb} to repository $REPO_NAME" "$ME";
+logmsg "Trying to upload package ${_deb} to repository $REPO_NAME" "$ME";
 $_curl --user "$APTLY_API_USER:$APTLY_API_PASS"			\
-	-XPOST -F "file=@${_newest_deb}" "$APTLY_API_URL/files/$REPO_NAME" | $_jq '.';
+	-XPOST -F "file=@${_deb}" "$APTLY_API_URL/files/$REPO_NAME" | $_jq '.';
 $_curl --user "$APTLY_API_USER:$APTLY_API_PASS"			\
-	-XPOST "$APTLY_API_URL/repos/$REPO_NAME/file/$REPO_NAME/${_newest_deb}" | $_jq '.';
+	-XPOST "$APTLY_API_URL/repos/$REPO_NAME/file/$REPO_NAME/${_deb}" | $_jq '.';
 
 logmsg "Trying to update published repository at $PUBLISH_PATH" "$ME";
 $_curl --user "$APTLY_API_USER:$APTLY_API_PASS"			\
 	-XPUT -H 'Content-Type: application/json' 		\
 	--data "{\"ForceOverwrite\": true}"			\
 	"$APTLY_API_URL/publish/filesystem:nginx:$PUBLISH_PATH_ESCAPED/bionic" | $_jq '.';
+
+REPO_NAME="latest_ubuntu_rtbrick-rbfs-dev_bionic_rtbrick-rbfs-dev";
+PUBLISH_PATH="latest/ubuntu/rtbrick-rbfs-dev";
+# https://github.com/aptly-dev/aptly/blob/master/api/publish.go#L44
+PUBLISH_PATH_ESCAPED="latest_ubuntu_rtbrick-rbfs-dev";
+
+# shellcheck disable=SC2012
+_deb="";
+_deb="$(ls -t ./*.deb | grep -E '^.\/rtbrick.*-dev_'| head -n 1)" || {
+	warmsg "No -dev package found";
+};
+
+[ -n "$_deb" ] && {
+	logmsg "Trying to upload package ${_deb} to repository $REPO_NAME" "$ME";
+	$_curl --user "$APTLY_API_USER:$APTLY_API_PASS"			\
+		-XPOST -F "file=@${_deb}" "$APTLY_API_URL/files/$REPO_NAME" | $_jq '.';
+	$_curl --user "$APTLY_API_USER:$APTLY_API_PASS"			\
+		-XPOST "$APTLY_API_URL/repos/$REPO_NAME/file/$REPO_NAME/${_deb}" | $_jq '.';
+
+	logmsg "Trying to update published repository at $PUBLISH_PATH" "$ME";
+	$_curl --user "$APTLY_API_USER:$APTLY_API_PASS"			\
+		-XPUT -H 'Content-Type: application/json' 		\
+		--data "{\"ForceOverwrite\": true}"			\
+		"$APTLY_API_URL/publish/filesystem:nginx:$PUBLISH_PATH_ESCAPED/bionic" | $_jq '.';
+}
+
+# shellcheck disable=SC2012
+_deb="";
+_deb="$(ls -t ./*.deb | grep -E '^.\/rtbrick.*-dbg_'| head -n 1)" || {
+	warmsg "No -dbg package found";
+};
+
+[ -n "$_deb" ] && {
+	logmsg "Trying to upload package ${_deb} to repository $REPO_NAME" "$ME";
+	$_curl --user "$APTLY_API_USER:$APTLY_API_PASS"			\
+		-XPOST -F "file=@${_deb}" "$APTLY_API_URL/files/$REPO_NAME" | $_jq '.';
+	$_curl --user "$APTLY_API_USER:$APTLY_API_PASS"			\
+		-XPOST "$APTLY_API_URL/repos/$REPO_NAME/file/$REPO_NAME/${_deb}" | $_jq '.';
+
+	logmsg "Trying to update published repository at $PUBLISH_PATH" "$ME";
+	$_curl --user "$APTLY_API_USER:$APTLY_API_PASS"			\
+		-XPUT -H 'Content-Type: application/json' 		\
+		--data "{\"ForceOverwrite\": true}"			\
+		"$APTLY_API_URL/publish/filesystem:nginx:$PUBLISH_PATH_ESCAPED/bionic" | $_jq '.';
+}
+
+logmsg "Finished uploading package(s)" "$ME";
