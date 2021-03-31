@@ -1,37 +1,33 @@
 {
     "bionic": {},
-
     "onl": {
         "pkg_group": "rtbrick-onl",
-
         "upload_cmd": ".jenkins/jenkins_upload_to_latest_debian_rtbrick-onl_stretch_rtbrick-onl.sh"
     },
-
     "__defaults__": {
         "project": "rtbrick-libnss-tacplus",
         "version_mmr": {"major": 1, "minor": 0, "rev": 1, "label": "", "meta": ""},
-
-	"containers": [
-		{
-			"name": "builder",
-			"image": "docker.rtbrick.net/devops/images/rtbrick/ubuntu-bionic-builder:latest",
-			"deps": [
-				"libaudit-dev", "rtbrick-libpam-tacplus"
-			],
-			"build_cmd": ".jenkins/jenkins_build_run_make.sh"
-		}
-	],
-
+        "containers": [
+            {
+                "name": "builder",
+                "image": "docker.rtbrick.net/devops/images/rtbrick/ubuntu-bionic-builder:latest",
+                "deps": [
+                    "libaudit-dev",
+                    "rtbrick-libpam-tacplus"
+                ],
+                "build_cmd": ".jenkins/jenkins_build_run_make.sh"
+            }
+        ],
         "pkg_cmd": ".jenkins/jenkins_package_create_deb.sh",
-	"pkg_cont": "builder",
+        "pkg_cont": "builder",
         "pkg_name": "rtbrick-libnss-tacplus",
         "pkg_descr": "RtBrick fork of libnss-tacplus: NSS plugin to lookup tacacs client username, and match mapped user after login",
         "pkg_group": "rtbrick-rbfs",
         "pkg_deps": [
-		"libaudit1", "rtbrick-libpam-tacplus"
-	],
-	"pkg_services": [ ],
-
+            "libaudit1",
+            "rtbrick-libpam-tacplus"
+        ],
+        "pkg_services": [],
         "upload_cmd": ".jenkins/jenkins_upload_to_latest_ubuntu_rtbrick-rbfs_bionic_rtbrick-rbfs.sh"
     }
 }
