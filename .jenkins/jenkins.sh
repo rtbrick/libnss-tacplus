@@ -427,6 +427,7 @@ logmsg "$GIT_COMMIT: $_git_commit_subj - $_git_commit_email" "$ME";
 # Get build configuration variables.
 proj="$(get_build_key_or_def "$build_name" "project")";
 ver_mmr="$(get_build_key_or_def "$build_name" "version_mmr")";
+ver_mmr="$(mmr_date_repl "$ver_mmr")";
 ver_str="$(mmr_to_str "$ver_mmr")";
 [ -z "$ver_str" ] && die "Something went wrong regarding versions";
 
@@ -730,7 +731,7 @@ upload_cont="$(get_build_key_or_def "$build_name" "upload_cont" || true)";
 
 # Run the upload step.
 if [ -n "$upload_script" ]; then
-	if [ -z "$highlevel_step" ] || [ "_$highlevel_step" == "_package" ]; then
+	if [ -z "$highlevel_step" ] || [ "_$highlevel_step" == "_upload" ]; then
 		# Only run the upload step if this is a Jenkins build, not a
 		# local one.
 		if [ -z "$local_build" ] || [ "$upload_force" -eq "1" ]; then

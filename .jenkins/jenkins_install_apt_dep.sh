@@ -58,12 +58,30 @@ $_getent passwd "_apt" 2>/dev/null 1>/dev/null && {
 }
 cd "$tmp_dir";
 
-$_apt_get download -yqq "${pkgs[@]}";
-for deb in *.deb; do
-	logmsg "Installing '$deb'" "$ME";
+for x in "${pkgs[@]}"; do
+	# Check if this is an rtbrick package dependency or not.
+	echo "$x" | grep -E '^rtbrick-' 2>/dev/null 1>/dev/null || {
+		logmsg "Installing normal package '$x'" "$ME";
+		out="$($_apt_get install -yqq --allow-downgrades	\
+			--no-install-recommends "$x")" || {
+			rc="$?";
+			errmsg "Installation of '$x' failed" "$ME";
+			echo "$out";
+			exit "$rc";
+		};
+
+		continue;
+	}
+
+	logmsg "Downloading rtbrick package '$x'" "$ME";
+	$_apt_get download -yqq "$x";
+
+	deb="$(ls *.deb)";
+	logmsg "Installing rtbrick package '$deb'" "$ME";
 	$_dpkg --force-depends --force-confnew --force-downgrade -i "$deb";
+
+	rm *.deb;
 done
 
 cd "$initial_dir";
-rm "$tmp_dir"/*.deb || true;
 rmdir "$tmp_dir" || true;

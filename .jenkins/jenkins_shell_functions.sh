@@ -450,8 +450,8 @@ mmr_from_str() {
 	return 0;
 }
 
-# mmr_date_repl replaces any occurrences {{ .Date.Year }} , {{ .Date.Month }}
-# or {{ .Date.Day }} with their current values as returned by the date command.
+# mmr_date_repl replaces any occurrences $year_tpl , $month_tpl
+# or $day_tpl with their current values as returned by the date command.
 # Should be executed in a sub-shell, like so:
 #
 #     val="$(mmr_date_repl "json_dict")"
@@ -463,45 +463,55 @@ mmr_date_repl() {
 	local bugfix="";
 	local label="";
 	local meta="";
+	# This should have been $year_tpl but we need to escape it as not
+	# to confuse sed.
+	local year_tpl="\{\{ \.Date\.Year \}\}";
 	local year="";
+	local month_tpl="\{\{ \.Date\.Month \}\}";
 	local month="";
+	local day_tpl="\{\{ \.Date\.Day \}\}";
 	local day="";
 	local result="";
 
-	major="$(get_dict_key "$ver_a" "major" | $_bc)";
-	minor="$(get_dict_key "$ver_a" "minor" | $_bc)";
-	rev="$(get_dict_key "$ver_a" "rev" | $_bc)";
-	bugfix="$(get_dict_key "$ver_a" "bugfix" | $_bc)" || bugfix="";
-	label="$(get_dict_key "$ver_a" "label" || true)";
-	meta="$(get_dict_key "$ver_a" "meta" || true)";
+	major="$(get_dict_key "$v" "major")";
+	minor="$(get_dict_key "$v" "minor")";
+	rev="$(get_dict_key "$v" "rev")";
+	bugfix="$(get_dict_key "$v" "bugfix" || true)";
+	label="$(get_dict_key "$v" "label" || true)";
+	meta="$(get_dict_key "$v" "meta" || true)";
 
 	year="$(date '+%y')";
 	month="$(date '+%m')";
 	day="$(date '+%d')";
 
-	major="$(echo "$major" | sed -E "s/{{ .Date.Year }}/$year/g"	\
-		| sed -E "s/{{ .Date.Month }}/$month/g"			\
-		| sed -E "s/{{ .Date.Day }}/$day/g")";
-	minor="$(echo "$minor" | sed -E "s/{{ .Date.Year }}/$year/g"	\
-		| sed -E "s/{{ .Date.Month }}/$month/g"			\
-		| sed -E "s/{{ .Date.Day }}/$day/g")";
-	rev="$(echo "$rev" | sed -E "s/{{ .Date.Year }}/$year/g"	\
-		| sed -E "s/{{ .Date.Month }}/$month/g"			\
-		| sed -E "s/{{ .Date.Day }}/$day/g")";
-	[ -n "$bugfix" ] && bugfix="$(echo "$bugfix"			\
-		| sed -E "s/{{ .Date.Year }}/$year/g"			\
-		| sed -E "s/{{ .Date.Month }}/$month/g"			\
-		| sed -E "s/{{ .Date.Day }}/$day/g")";
-	[ -n "$label" ] && label="$(echo "$label"			\
-		| sed -E "s/{{ .Date.Year }}/$year/g"			\
-		| sed -E "s/{{ .Date.Month }}/$month/g"			\
-		| sed -E "s/{{ .Date.Day }}/$day/g")";
-	[ -n "$meta" ] && label="$(echo "$meta"				\
-		| sed -E "s/{{ .Date.Year }}/$year/g"			\
-		| sed -E "s/{{ .Date.Month }}/$month/g"			\
-		| sed -E "s/{{ .Date.Day }}/$day/g")";
+	major="$(echo "$major" | sed -E "s/$year_tpl/$year/g"	\
+		| sed -E "s/$month_tpl/$month/g"		\
+		| sed -E "s/$day_tpl/$day/g")";
+	minor="$(echo "$minor" | sed -E "s/$year_tpl/$year/g"	\
+		| sed -E "s/$month_tpl/$month/g"		\
+		| sed -E "s/$day_tpl/$day/g")";
+	rev="$(echo "$rev" | sed -E "s/$year_tpl/$year/g"	\
+		| sed -E "s/$month_tpl/$month/g"		\
+		| sed -E "s/$day_tpl/$day/g")";
+	[ -n "$bugfix" ] && bugfix="$(echo "$bugfix"		\
+		| sed -E "s/$year_tpl/$year/g"			\
+		| sed -E "s/$month_tpl/$month/g"		\
+		| sed -E "s/$day_tpl/$day/g")";
+	[ -n "$label" ] && label="$(echo "$label"		\
+		| sed -E "s/$year_tpl/$year/g"			\
+		| sed -E "s/$month_tpl/$month/g"		\
+		| sed -E "s/$day_tpl/$day/g")";
+	[ -n "$meta" ] && label="$(echo "$meta"			\
+		| sed -E "s/$year_tpl/$year/g"			\
+		| sed -E "s/$month_tpl/$month/g"		\
+		| sed -E "s/$day_tpl/$day/g")";
 
-	echo ", \"label\": \"$label\", \"meta\": \"$meta\"}";
+	# Ensure fields have numeric values.
+	major="$(echo "$major" | $_bc)";
+	minor="$(echo "$minor" | $_bc)";
+	rev="$(echo "$rev" | $_bc)";
+	bugfix="$(echo "$bugfix" | $_bc)";
+
 	result="{\"major\": $major, \"minor\": $minor, \"rev\": $rev";
 	[ -n "$bugfix" ] && result="${result}, \"bugfix\": \"$bugfix\"";
 	[ -n "$label" ] && result="${result}, \"label\": \"$label\"";
@@ -1168,6 +1178,18 @@ docker_prepare() {
 				local _dep="";
 				local _dep_resolved="";
 				_dep="$(echo "$cont_deps" | $_jq ".[$j]")";
+
+				# Check if this is an rtbrick package dependency or not.
+				echo "$_dep" | grep -E '^rtbrick-' 2>/dev/null 1>/dev/null || {
+					# We treat any non rtbrick- packages as passthrough and
+					# will try to install them later with the usual APT tooling.
+					# shellcheck disable=SC2206
+					_deps+=($_dep);
+					j="$(( j + 1 ))";
+
+					continue;
+				}
+
 				# Resolving the exact dependency version needs to happen
 				# inside the respective container.
 				# NOTE: '$_docker exec' vs '$_docker_exec' is
@@ -1181,7 +1203,7 @@ docker_prepare() {
 					"$dckr_name"							\
 					$apt_resolv_script "$_dep" "--with-dev")";
 
-				logmsg "Package dependency '$_dep' resolved to: [$_dep_resolved]"  "docker_prepare";
+				logmsg "rtbrick package dependency '$_dep' resolved to: [$_dep_resolved]"  "docker_prepare";
 
 				# shellcheck disable=SC2206
 				_deps+=($_dep_resolved);
