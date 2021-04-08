@@ -19,6 +19,7 @@
         "image": "docker.rtbrick.net/devops/images/rtbrick/ubuntu-bionic-builder:latest",
         "compile_deps": [
           "libaudit-dev",
+          "rtbrick-libtacplus-map",
           "rtbrick-libpam-tacplus"
         ],
         "build_commands": [
@@ -40,6 +41,7 @@
     "pkg_group": "rtbrick-rbfs",
     "pkg_deps": [
       "libaudit1",
+      "rtbrick-libtacplus-map",
       "rtbrick-libpam-tacplus"
     ],
     "pkg_services": [],
