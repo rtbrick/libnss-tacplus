@@ -14,7 +14,7 @@ _codename="${_codename:-$(/usr/bin/lsb_release -s -c || echo 'unknown')}";
 if [ "__{{ .ServiceName }}" != "__" ] && [ "__{{ .ServiceName }}" != "__ " ]; then
 	>&2 echo "Running enable and start for package service '{{ .ServiceName }}' ...";
 	case $_codename in
-		bionic)
+		bionic|focal)
 			_systemctl="$(which systemctl)"	\
 				|| _systemctl="echo [systemctl not found]: would have run: systemctl";
 	
@@ -22,7 +22,7 @@ if [ "__{{ .ServiceName }}" != "__" ] && [ "__{{ .ServiceName }}" != "__ " ]; th
 			$_systemctl enable "{{ .ServiceName }}";
 			$_systemctl start "{{ .ServiceName }}";
 			;;
-		stretch)
+		stretch|buster)
 			update-rc.d "{{ .ServiceName }}" defaults;
 			service "{{ .ServiceName }}" start;
   			;;
