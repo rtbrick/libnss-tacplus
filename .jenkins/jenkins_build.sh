@@ -40,6 +40,7 @@ trap 'trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
 
 # Dependencies on other programs which might not be installed. Here we rely on
 # values discovered and passed on by the calling script.
+# shellcheck disable=SC2269
 _jq="$_jq";
 
 ME="jenkins_build.sh";	# Useful for log messages.
@@ -49,9 +50,15 @@ ME="jenkins_build.sh";	# Useful for log messages.
 #### configuration build_commands variable.
 ####
 
+# Try to save the current directory so we can restore if after running the build
+# commands. Could someone use such a variable name in the build commands ? You
+# can never be sure.
+____initial_dir="$PWD";
+
 # Avoid shell check SC2154 `referenced but not assigned` but stil rely on value
 # passed on by calling script. If variable is not set by calling script this
 # should through an error.
+# shellcheck disable=SC2269
 build_commands="$build_commands";
 build_commands_len="$(echo "$build_commands" | $_jq -c '. | values | length')";
 i="0";
@@ -61,11 +68,14 @@ while [ "$i" -lt "$build_commands_len" ]; do
 
 	[ -n "$cmd" ] && {
 		logmsg "Executing build command #$i '$cmd' ..." "$ME";
-		eval "$cmd";
+		eval " $cmd;";
 	}
 
 	i="$(( i + 1 ))";
 done
+
+# Restore working directory if it was changes by build commands.
+cd "${____initial_dir}";
 
 # Last iteration through the while will end with $i NOT being lower than length
 # hence the last executed command of the script will have a non-zero return

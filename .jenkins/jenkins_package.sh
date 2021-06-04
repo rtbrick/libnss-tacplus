@@ -40,6 +40,7 @@ trap 'trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
 
 # Dependencies on other programs which might not be installed. Here we rely on
 # values discovered and passed on by the calling script.
+# shellcheck disable=SC2269
 _jq="$_jq";
 
 ME="jenkins_package.sh";	# Useful for log messages.
@@ -68,6 +69,8 @@ _pkg_name="${pkg_name:-}"; [ -z "$_pkg_name" ] && die "Cannot build a package wi
 _pkg_suffix="${pkg_suffix:-}";
 _pkg_descr="${pkg_descr:-}"; [ -z "$_pkg_descr" ] && die "Cannot build a package without a descripion.";
 _pkg_group="${pkg_group:-}"; [ -z "$_pkg_group" ] && die "Cannot build a package without a group.";
+_pkg_provides="${pkg_provides:-}";
+_pkg_conflicts="${pkg_conflicts:-}";
 _pkg_deps="${pkg_deps:-}";
 _pkg_deps_exact="${pkg_deps_exact:-}";
 _pkg_srvs="${pkg_services:-}";
@@ -186,6 +189,12 @@ if [ -n "$_pkg_srvs" ] && pkg_is_not_dev_dbg; then
 		srv_restart_hold="$(get_dict_key "$curr_srv_val" "restart_hold" || true)";
 		srv_restart_intv="$(get_dict_key "$curr_srv_val" "restart_intv" || true)";
 		srv_restart_limit="$(get_dict_key "$curr_srv_val" "restart_limit" || true)";
+		srv_runas="$(get_dict_key "$curr_srv_val" "runas" || echo "{}")";
+		srv_runas_user="$(get_dict_key "$srv_runas" "user" || true)";
+		srv_runas_uid="$(get_dict_key "$srv_runas" "uid" || true)";
+		srv_runas_group="$(get_dict_key "$srv_runas" "group" || true)";
+		srv_runas_gid="$(get_dict_key "$srv_runas" "gid" || true)";
+		srv_runas_more_groups="$(get_dict_key "$srv_runas" "more_groups" || true)";
 
 		# This is a weird limitation of checkinstall / installwatch. If
 		# the target hierarchy doesn't exist in the system where the
@@ -201,41 +210,82 @@ if [ -n "$_pkg_srvs" ] && pkg_is_not_dev_dbg; then
 			"${srv_restart}"			\
 			"${srv_restart_hold}"			\
 			"${srv_restart_intv}"			\
-			"${srv_restart_limit}";
+			"${srv_restart_limit}"			\
+			"$srv_runas_user"			\
+			"$srv_runas_uid"			\
+			"$srv_runas_group"			\
+			"$srv_runas_gid"			\
+			"$srv_runas_more_groups";
 
 		_pkg_install_cmd+=" install -o root -g root -m 0644 -D -t ${SYSTEMD_SERVICE_DIR}/ ${srv_name}.service;";
 		[ -n "${srv_conf}" ] && [ "__${srv_conf}" != "__null" ]         \
 			&& _pkg_install_cmd+=" install -o root -g root -m 0644 -D -t ${RTBRICK_BD_CONF_DIR}/ ${srv_conf};";
 
 		pkg_serv_template "$PAK_FILES_LOCATION/preinstall-pak.tpl"	\
-			"preinstall-pak.$i"	\
-			"${srv_name}"		\
-			""			\
-			"";
+			"preinstall-pak.$i"			\
+			"${srv_name}"				\
+			"${srv_cmd}"				\
+			"${_pkg_name}"				\
+			"${srv_restart}"			\
+			"${srv_restart_hold}"			\
+			"${srv_restart_intv}"			\
+			"${srv_restart_limit}"			\
+			"$srv_runas_user"			\
+			"$srv_runas_uid"			\
+			"$srv_runas_group"			\
+			"$srv_runas_gid"			\
+			"$srv_runas_more_groups";
 		printf "\n\n" >> "preinstall-pak";
 		cat "preinstall-pak.$i" >> "preinstall-pak"; rm "preinstall-pak.$i";
 
 		pkg_serv_template "$PAK_FILES_LOCATION/postinstall-pak.tpl"	\
-			"postinstall-pak.$i"	\
-			"${srv_name}"		\
-			""			\
-			"";
+			"postinstall-pak.$i"			\
+			"${srv_name}"				\
+			"${srv_cmd}"				\
+			"${_pkg_name}"				\
+			"${srv_restart}"			\
+			"${srv_restart_hold}"			\
+			"${srv_restart_intv}"			\
+			"${srv_restart_limit}"			\
+			"$srv_runas_user"			\
+			"$srv_runas_uid"			\
+			"$srv_runas_group"			\
+			"$srv_runas_gid"			\
+			"$srv_runas_more_groups";
 		printf "\n\n" >> "postinstall-pak";
 		cat "postinstall-pak.$i" >> "postinstall-pak"; rm "postinstall-pak.$i";
 
 		pkg_serv_template "$PAK_FILES_LOCATION/preremove-pak.tpl"	\
-			"preremove-pak.$i"	\
-			"${srv_name}"		\
-			""			\
-			"";
+			"preremove-pak.$i"			\
+			"${srv_name}"				\
+			"${srv_cmd}"				\
+			"${_pkg_name}"				\
+			"${srv_restart}"			\
+			"${srv_restart_hold}"			\
+			"${srv_restart_intv}"			\
+			"${srv_restart_limit}"			\
+			"$srv_runas_user"			\
+			"$srv_runas_uid"			\
+			"$srv_runas_group"			\
+			"$srv_runas_gid"			\
+			"$srv_runas_more_groups";
 		printf "\n\n" >> "preremove-pak";
 		cat "preremove-pak.$i" >> "preremove-pak"; rm "preremove-pak.$i";
 
 		pkg_serv_template "$PAK_FILES_LOCATION/postremove-pak.tpl"	\
-			"postremove-pak.$i"	\
-			"${srv_name}"		\
-			""			\
-			"";
+			"postremove-pak.$i"			\
+			"${srv_name}"				\
+			"${srv_cmd}"				\
+			"${_pkg_name}"				\
+			"${srv_restart}"			\
+			"${srv_restart_hold}"			\
+			"${srv_restart_intv}"			\
+			"${srv_restart_limit}"			\
+			"$srv_runas_user"			\
+			"$srv_runas_uid"			\
+			"$srv_runas_group"			\
+			"$srv_runas_gid"			\
+			"$srv_runas_more_groups";
 		printf "\n\n" >> "postremove-pak";
 		cat "postremove-pak.$i" >> "postremove-pak"; rm "postremove-pak.$i";
 
@@ -308,6 +358,26 @@ declare -a _checkinstall_args=("--type=debian"			\
 	"--pkgversion=$_ver_str"				\
 );
 
+[ -n "$_pkg_provides" ]	&& _checkinstall_args+=("--provides=$_pkg_provides");
+
+# Transform the JSON list of conflicts into a comma separated list.
+if [ -n "$_pkg_conflicts" ]; then
+	conflicts="";
+	conflicts_len="$(echo "$_pkg_conflicts" | $_jq '. | length')";
+	i="0";
+	while [ "$i" -lt "$conflicts_len" ]; do
+		con="$(echo "$_pkg_conflicts" | $_jq ".[$i]")";
+		if [ -z "$conflicts" ]; then
+			conflicts="$con";
+		else
+			conflicts="${conflicts},$con";
+		fi
+		i="$(( i + 1 ))";
+	done
+
+	_checkinstall_args+=("--conflicts=$conflicts");
+fi
+
 # Only set checkinstall debug flag when global debug is set.
 [ "${__global_debug:-0}" -gt "0" ] && {
 	_checkinstall_args+=("-d" "$__global_debug");
@@ -327,6 +397,11 @@ _tmp="$(echo "$_ver_str" | grep -Ec -- '-')" && {
 #### Installation commands (mkdir, cp, install etc.) follow BELOW. These are
 #### taken automatically from the build configuration pkg_commands variable.
 ####
+
+# Try to save the current directory so we can restore if after running the build
+# commands. Could someone use such a variable name in the build commands ? You
+# can never be sure.
+____initial_dir="$PWD";
 
 # Avoid shell check SC2154 `referenced but not assigned` but stil rely on value
 # passed on by calling script. If variable is not set by calling script this
@@ -352,4 +427,7 @@ done
 
 # Finally execute checkinstall with all the prepared arguments and install
 # commands.
-$_checkinstall "${_checkinstall_args[@]}" /bin/sh -ue -c "${_pkg_install_cmd}";
+$_checkinstall "${_checkinstall_args[@]}" /bin/bash -ue -c "${_pkg_install_cmd}";
+
+# Restore working directory if it was changes by package commands.
+cd "${____initial_dir}";

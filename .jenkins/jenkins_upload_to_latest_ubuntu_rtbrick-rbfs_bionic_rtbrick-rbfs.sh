@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 
-#
-# Based on rtbrick-build-tools/aptly_update_bionic.sh .
-# TODO: Clean all this stuff up.
-#
-
 # Fail hard and fast. Exit at the first error or undefined variable.
 set -ue;
 

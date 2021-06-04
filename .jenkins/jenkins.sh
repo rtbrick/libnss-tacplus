@@ -99,6 +99,10 @@ custom_trap_debug() {
 	>&2 printf "%s command '%s' failed with exit code %d at line %d in %s\n" \
 		"$header" "$cmd" "$rc" "$lineno" "$file";
 
+	# Reset the header so that it's not confusing for other log messages.
+	header="$(date "$DATE_FMT") INFO:";
+	[ -t 2 ] && header="\e[36m$header\e[0m";
+
 	prom_set "success_job" "0" || true;
 	prom_update_duration "duration_total" || true;
 	>&2 printf "%s Trying to push Prometheus metrics\n" "$header";
@@ -125,6 +129,7 @@ trap 'custom_trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
 # discovered and set in jenkins_shell_functions.
 _git="$_git";
 _jq="$_jq";
+_rtb_itool="$(which rtb-itool)";
 _sha256sum="$_sha256sum";
 
 # Prefer podman over docker if available.
@@ -141,7 +146,10 @@ DEFAULT_PKG_SCRIPT="${__jenkins_scripts_dir:-./.jenkins}/jenkins_package.sh";
 # package, test, upload will run if a specific container for them is not
 # defined in build_conf through a variable like `pkg_cont`.
 DEFAULT_STEP_CONT="builder";
-# 
+#
+# RTB_ITOOL_CONFIG is the location of the rtb-itool configuration file. It is
+# used to load the GITLAB_TOKEN in the environment if needed.
+RTB_ITOOL_CONFIG="$HOME/.config/rtb-itool/config.yml";
 # build_conf is the JSON file describing the build. It has a default value but
 # it can also be provided via the -C CLI option.
 build_conf="${__jenkins_scripts_dir:-./.jenkins}/jenkins_build_conf.json";
@@ -347,7 +355,7 @@ get_conf_key "$build_name" 1>/dev/null || {
 }
 
 [ -n "$cleanup_hash" ] && {
-	logmsg "Cleaning up any pre-exiting docker networks and containers left over from previous build_job_hash: $cleanup_hash" "$ME";
+	logmsg "Cleaning up any pre-existing docker networks and containers left over from previous build_job_hash: $cleanup_hash" "$ME";
 	docker_cleanup "$build_name" "$cleanup_hash";
 	exit 0;
 }
@@ -439,6 +447,8 @@ prom_add "start_time_job" "UNIX timestamp of job start." "counter" "";
 prom_set "start_time_job" "$build_ts";
 prom_add "end_time_job" "UNIX timestamp of job start." "counter" "";
 prom_set "end_time_job" "0";
+prom_add "need_build" "Whether the project required (re-)building or not (1 for true, 0 for false)." "gauge" "";
+prom_set "need_build" "1";
 prom_add_duration "duration_total" "Duration of the job (either either job or part of it) in seconds." "step=\"total\"" "$build_ts";
 
 # Get the latest tag that contains a SEMVER 2.0 version string.
@@ -517,6 +527,54 @@ fi
 build_job_hash="$(echo "$proj $build_name $ver_str" | $_sha256sum | cut -c '1-12')";
 logmsg "Running for project: ${proj}; build_name: ${build_name}; version: ${ver_str}; build_job_hash: ${build_job_hash}" "$ME";
 
+# rtb-itool needs a valid GITLAB_TOKEN to be able to do repository read operations
+# against gitlab.rtbrick.net . In the case of a Jenkins build a valid token should
+# have been injected into the environment. But in the case of a local build we
+# should try to load it now. rtb-itool is also called later during compile time
+# dependency resolution and at that moment in time rtb-itool will not have access
+# to read it's config file anymore.
+[ -z "${GITLAB_TOKEN:-}" ] && {
+	source_gitlab_token "$RTB_ITOOL_CONFIG" || {
+		errmsg "Can't load GITLAB_TOKEN from '$RTB_ITOOL_CONFIG'" "$ME";
+		>&2 echo "jenkins.sh now dependens on rtb-itool and in turn rtb-itool depends";
+		>&2 echo "on having a valid repository read GITLAB_TOKEN for gitlab.rtbrick.net";
+		>&2 echo "please consult the rtb-itool help on how to setup your Gitlab auth !";
+		exit 3;
+	}
+}
+
+# Identify if current build creates a package.
+pkg_name="$(get_build_key_or_def "$build_name" "pkg_name" || true)";
+[ -n "$pkg_name" ] && [ -z "$local_build" ] && {
+	pkg_group="$(get_build_key_or_def "$build_name" "pkg_group")";
+	source_etc_os_release;
+	# Get distribution and release from the build conf or rely on host OS values.
+	pkg_distribution="$(get_build_key_or_def "$build_name" "pkg_distribution" || echo "$OS_RELEASE_ID")";
+	pkg_release="$(get_build_key_or_def "$build_name" "pkg_release" || echo "$OS_RELEASE_VERSION_CODENAME")";
+
+	existing_pkg="$($_rtb_itool pkg needbuild --log-level=info	\
+				--as-deb-dep				\
+				--branch="$BRANCH"			\
+				--pkg-distribution="$pkg_distribution"	\
+				--pkg-release="$pkg_release"		\
+				--pkg-group="$pkg_group"		\
+				"$pkg_name")" && {
+
+		existing_version="$(echo "$existing_pkg" | awk -F '=' '{print $2;}')";
+		[ -z "$local_build" ] && echo "$existing_version" > ".jenkins_build_version.txt";
+		logmsg "Finished successfully by using previous package: $existing_pkg ." "$ME";
+
+		prom_set "need_build" "0";
+		prom_set "end_time_job" "$(date '+%s')";
+		prom_update_duration "duration_total";
+		prom_set "success_job" "1";
+		prom_push "$proj";
+		logmsg "Prometheus metrics pushed" "$ME";
+		exit 0;
+	}
+
+	logmsg "No previous package found or outdated previous package" "$ME";
+}
 
 # Prepare the build envoironment which can be composed of one or more docker
 # containers.
@@ -639,6 +697,8 @@ for pkg_suffix in "" "dev" "dbg"; do
 			pkg_name="$(get_build_key_or_def "$build_name" "pkg_name")";
 			pkg_descr="$(get_build_key_or_def "$build_name" "pkg_descr")";
 			pkg_group="$(get_build_key_or_def "$build_name" "pkg_group")";
+			pkg_provides="$(get_build_key_or_def "$build_name" "pkg_provides" || true)";
+			pkg_conflicts="$(get_build_key_or_def "$build_name" "pkg_conflicts" || true)";
 			pkg_deps="$(get_build_key_or_def "$build_name" "pkg_deps")";
 			pkg_deps_exact="$(get_build_key_or_def "$build_name" "pkg_deps_exact" || true)";
 			pkg_services="$(get_build_key_or_def "$build_name" "pkg_services" || true)";
@@ -661,6 +721,8 @@ for pkg_suffix in "" "dev" "dbg"; do
 				-e "pkg_suffix=$pkg_suffix"			\
 				-e "pkg_descr=$pkg_descr"			\
 				-e "pkg_group=$pkg_group"			\
+				-e "pkg_provides=$pkg_provides"			\
+				-e "pkg_conflicts=$pkg_conflicts"		\
 				-e "pkg_deps=$pkg_deps"				\
 				-e "pkg_deps_exact=$pkg_deps_exact"		\
 				-e "pkg_services=$pkg_services"			\

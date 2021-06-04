@@ -106,6 +106,7 @@ _curl="$(which curl)";			export _curl;
 _git="$(which git)";			export _git;
 _hostname="$(which hostname)"		export _hostname;
 _jq="$(which jq) -er";			export _jq;
+_mktemp="$(which mktemp)";		export _mktemp;
 _perl="$(which perl)";			export _perl;
 _sha256sum="$(which sha256sum || which sha256)"; export _sha256sum;
 
@@ -409,10 +410,12 @@ mmr_to_str() {
 	ver_major="$(get_dict_key "$ver" "major" | $_bc)";
 	ver_minor="$(get_dict_key "$ver" "minor" | $_bc)";
 	ver_rev="$(get_dict_key "$ver" "rev" | $_bc)";
+	ver_bugfix="$(get_dict_key "$ver" "bugfix" || echo "0" | $_bc)";
 	ver_label="$(get_dict_key "$ver" "label" || true)";
 	ver_meta="$(get_dict_key "$ver" "meta" || true)";
 
 	str="$ver_major.$ver_minor.$ver_rev";
+	[ "$ver_bugfix" -ne "0" ] && str="$str.$ver_bugfix";
 	[ -n "$ver_label" ] && str="$str-$ver_label";
 	[ -n "$ver_meta" ] && str="$str+$ver_meta";
 
@@ -690,14 +693,19 @@ aptly_get_latest_rev() {
 # pkg_serv_template takes a source template file and creates destination while
 # replacing all variable occurrences. NOTE: this is NOT a generic templating
 # function. Should be called directly (not in a sub-shell), like so:
-#	pkg_serv_template "src.json.tpl" "dst.json"	\
+#	pkg_serv_template "src.tpl" "dst"		\
 #		"$service_name"				\
 #		"$service_start_cmd"			\
 #		"$package_name"				\
 #		"$srv_restart"				\
 #		"$srv_restart_hold"			\
-#		"$srv_restart_intv"
-#		"$srv_restart_limit";
+#		"$srv_restart_intv"			\
+#		"$srv_restart_limit"			\
+#		"$srv_runas_user"			\
+#		"$srv_runas_uid"			\
+#		"$srv_runas_group"			\
+#		"$srv_runas_gid"			\
+#		"$srv_runas_more_groups";
 pkg_serv_template() {
 	set -eu;
 
@@ -710,6 +718,11 @@ pkg_serv_template() {
 	local srv_restart_hold="${7:-30000ms}";
 	local srv_restart_intv="${8:-420}";
 	local srv_restart_limit="${9:-3}";
+	local srv_runas_user="${10:-root}";
+	local srv_runas_uid="${11:-0}";
+	local srv_runas_group="${12:-root}";
+	local srv_runas_gid="${13:-0}";
+	local srv_runas_more_groups="${14:-$srv_runas_group}";
 
 	[ -n "$src" ]			&& cp "$src" "$dst";
 	[ -n "${service_name}" ]	&& sed -i "s/{{ .ServiceName }}/${service_name}/g" "$dst";
@@ -719,6 +732,11 @@ pkg_serv_template() {
 	[ -n "${srv_restart_hold}" ]   	&& sed -i "s/{{ .ServiceRestartSec }}/${srv_restart_hold}/g" "$dst";
 	[ -n "${srv_restart_intv}" ]   	&& sed -i "s/{{ .StartLimitIntervalSec }}/${srv_restart_intv}/g" "$dst";
 	[ -n "${srv_restart_limit}" ]  	&& sed -i "s/{{ .StartLimitBurst }}/${srv_restart_limit}/g" "$dst";
+	[ -n "${srv_runas_user}" ]  	&& sed -i "s/{{ .RunAs.User }}/${srv_runas_user}/g" "$dst";
+	[ -n "${srv_runas_uid}" ]  	&& sed -i "s/{{ .RunAs.UID }}/${srv_runas_uid}/g" "$dst";
+	[ -n "${srv_runas_group}" ]  	&& sed -i "s/{{ .RunAs.Group }}/${srv_runas_group}/g" "$dst";
+	[ -n "${srv_runas_gid}" ]  	&& sed -i "s/{{ .RunAs.GID }}/${srv_runas_gid}/g" "$dst";
+	[ -n "${srv_runas_more_groups}" ] && sed -i "s/{{ .RunAs.MoreGroups }}/${srv_runas_more_groups}/g" "$dst";
 
 	# The return code of the function is the return code of the last
 	# command. Above even if we handle `[ -n "${.......}" ]` being false,
@@ -1146,6 +1164,7 @@ docker_prepare() {
 		if [ "$cont_deps_len" -gt "0" ]; then
 			logmsg "Installing dependencies in container '$dckr_name'" \
 				"docker_prepare";
+
 			# What can happen is a that the current build tries to update
 			# at the same time another build finishes and is uploading
 			# it's package.
@@ -1165,61 +1184,115 @@ docker_prepare() {
 				_apt_update_success="1";
 			done
 
-			[ "$_apt_update_success" -ne "1" ] && { 
+			[ "$_apt_update_success" -ne "1" ] && {
 				errmsg "APT update failed even after several retries" "docker_prepare";
 				return 1;
 			}
 
-			declare -a _deps=();
-			local _deps_len="";
+			# Compile time dependency resolution for the current
+			# container. The dependency resolution is influenced by
+			# whether the current build creates a package or not.
+			local pkg_name="";
+			local pkg_group="";
+			local pkg_distribution="";
+			local pkg_release="";
+			pkg_name="$(get_build_key_or_def "$build_name" "pkg_name" || true)";
+			[ -n "$pkg_name" ] && {
+				# If is non-empty then we MUST have a pkg_group.
+				pkg_group="$(get_build_key_or_def "$build_name" "pkg_group")";
+				pkg_distribution="$(get_build_key_or_def "$build_name" "pkg_distribution" || true)";
+				pkg_release="$(get_build_key_or_def "$build_name" "pkg_release" || true)";
+			}
+
+			echo -n "" > "$apt_resolv_log";
+			declare -a deps_to_be_resolved=();
+			declare -a deps_to_be_installed=();
 			local j="0";
-			_deps_len="$(echo "$cont_deps" | $_jq '. | length')";
-			while [ "$j" -lt "$_deps_len" ]; do
-				local _dep="";
-				local _dep_resolved="";
-				_dep="$(echo "$cont_deps" | $_jq ".[$j]")";
+			while [ "$j" -lt "$cont_deps_len" ]; do
+				local dep="";
+				dep="$(echo "$cont_deps" | $_jq ".[$j]")";
 
-				# Check if this is an rtbrick package dependency or not.
-				echo "$_dep" | grep -E '^rtbrick-' 2>/dev/null 1>/dev/null || {
-					# We treat any non rtbrick- packages as passthrough and
-					# will try to install them later with the usual APT tooling.
-					# shellcheck disable=SC2206
-					_deps+=($_dep);
-					j="$(( j + 1 ))";
+				# Check if this is an rtbrick package dependency
+				# or not.
+				case "$dep" in
+					rtbrick-*)
+						deps_to_be_resolved+=("$dep");
+					;;
 
-					continue;
-				}
+					*:::rtbrick-*)
+						local pkg_group_override="";
+						pkg_group_override="$(echo "$dep" | sed -E 's/^([^:]+):::(.+)$/\1/g')";
+						dep="$(echo "$dep" | sed -E 's/^([^:]+):::(.+)$/\2/g')";
 
-				# Resolving the exact dependency version needs to happen
-				# inside the respective container.
-				# NOTE: '$_docker exec' vs '$_docker_exec' is
-				# NOT a mistake here.
-				# shellcheck disable=SC2086
-				_dep_resolved="$($_docker exec						\
-					-e "DEBIAN_FRONTEND=noninteractive"				\
-					-e "BRANCH=$BRANCH"						\
-					-e "BRANCH_SANITIZED=$BRANCH_SANITIZED"				\
-					-e "__jenkins_scripts_dir=${__jenkins_scripts_dir:-./.jenkins}"	\
-					"$dckr_name"							\
-					$apt_resolv_script "$_dep" "--with-dev")";
+						if [ -z "$pkg_group_override" ] || [ -z "$dep" ]; then
+							die "In pkg group override case: pkg_group_override='$pkg_group_override' dep='$dep'";
+						fi
 
-				logmsg "rtbrick package dependency '$_dep' resolved to: [$_dep_resolved]"  "docker_prepare";
+						local dep_resolved="";
+						dep_resolved="$($_docker exec						\
+							-e "DEBIAN_FRONTEND=noninteractive"				\
+							-e "GITLAB_TOKEN=${GITLAB_TOKEN:-}"				\
+							-e "BRANCH=$BRANCH"						\
+							-e "BRANCH_SANITIZED=$BRANCH_SANITIZED"				\
+							-e "__jenkins_scripts_dir=${__jenkins_scripts_dir:-./.jenkins}"	\
+							-e "pkg_name=$pkg_name"						\
+							-e "pkg_group=$pkg_group_override"				\
+							-e "pkg_distribution=$pkg_distribution"				\
+							-e "pkg_release=$pkg_release"					\
+							"$dckr_name"							\
+							$apt_resolv_script "--with-dev" "$dep")";
 
-				# shellcheck disable=SC2206
-				_deps+=($_dep_resolved);
+						local d="";
+						for d in $dep_resolved; do
+							logmsg "rtbrick package dependency with pkg group override '$pkg_group_override' resolved to: [$d]"  "docker_prepare";
+							deps_to_be_installed+=("$d");
+							echo "$d" >> "$apt_resolv_log";
+						done
+					;;
+
+					*)
+						# We treat any non rtbrick- packages as passthrough and
+						# will try to install them later with the usual APT tooling.
+						# shellcheck disable=SC2206
+						deps_to_be_installed+=("$dep");
+						echo "$dep" >> "$apt_resolv_log";
+					;;
+				esac
 
 				j="$(( j + 1 ))";
 			done
 
-			echo -n "" > "$apt_resolv_log";
+			# Resolving the exact dependency version needs to happen
+			# inside the respective container.
+			# NOTE: '$_docker exec' vs '$_docker_exec' is
+			# NOT a mistake here.
+			# shellcheck disable=SC2086
+			local deps_resolved="";
+			[ "${#deps_to_be_resolved[@]}" -gt "0" ] && {
+				deps_resolved="$($_docker exec						\
+					-e "DEBIAN_FRONTEND=noninteractive"				\
+					-e "GITLAB_TOKEN=${GITLAB_TOKEN:-}"				\
+					-e "BRANCH=$BRANCH"						\
+					-e "BRANCH_SANITIZED=$BRANCH_SANITIZED"				\
+					-e "__jenkins_scripts_dir=${__jenkins_scripts_dir:-./.jenkins}"	\
+					-e "pkg_name=$pkg_name"						\
+					-e "pkg_group=$pkg_group"					\
+					-e "pkg_distribution=$pkg_distribution"				\
+					-e "pkg_release=$pkg_release"					\
+					"$dckr_name"							\
+					$apt_resolv_script "--with-dev" "${deps_to_be_resolved[@]}")";
+			}
+
 			local d="";
-			for d in "${_deps[@]}"; do
+			for d in $deps_resolved; do
+				logmsg "rtbrick package dependency resolved to: [$d]"  "docker_prepare";
+				deps_to_be_installed+=("$d");
 				echo "$d" >> "$apt_resolv_log";
 			done
 
 			$_docker_exec -e "DEBIAN_FRONTEND=noninteractive"			\
 				"$dckr_name"							\
-				$apt_install_script "${_deps[@]}";
+				$apt_install_script "${deps_to_be_installed[@]}";
 		fi
 
 		i="$(( i + 1 ))";
@@ -1625,6 +1698,33 @@ prom_push() {
 	prom_gather | $_curl -fSL --data-binary @- "$url"		\
 		2>> "${PROM_curl_log}.err" 1>> "${PROM_curl_log}.log"	\
 		|| errmsg "Failed to push Prometheus metrics" "prom_push";
+}
+
+source_etc_os_release() {
+	local src="/etc/os-release";
+	local dst="";
+
+	dst="$($_mktemp)";
+
+	sed -E 's/^([^=]+)=(.*)/OS_RELEASE_\1=\2/g' "$src" > "$dst";
+
+	source "$dst";
+
+	rm "$dst";
+}
+
+source_gitlab_token() {
+	local src="$1";
+	local pattern='^[[:space:]]*gitlab_token[[:space:]]*(:|=)[[:space:]]*["]?(.*)["]?$';
+	local token="";
+
+	token="$(grep -E -i "$pattern" "$src" | sed -E "s/$pattern/\2/gI")";
+	# Function will return with a non-zero exit code if token is an empty
+	# string, however grep above should cause the pipeline to fail if there
+	# is no match.
+	[ -n "$token" ] && {
+		GITLAB_TOKEN="$token"; export GITLAB_TOKEN;
+	}
 }
 
 # Sentinel function to verify that this file is actually loaded successfully in
