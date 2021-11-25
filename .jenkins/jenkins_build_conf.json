@@ -7,7 +7,7 @@
     "containers": [
       {
         "name": "builder",
-        "image": "docker.rtbrick.net/devops/images/rtbrick/debian-stretch-builder:latest",
+        "image": "docker.rtbrick.net/devops/images/rtbrick/debian-stretch-builder",
         "compile_deps": [
           "libaudit-dev",
           "rtbrick-libtacplus-map",
@@ -24,7 +24,7 @@
     "pkg_group": "rtbrick-onl",
     "pkg_distribution": "debian",
     "pkg_release": "stretch",
-	"upload_script": ".jenkins/jenkins_upload_to_latest_debian_rtbrick-onl_stretch_rtbrick-onl.sh"
+    "upload_script": ".jenkins/jenkins_upload_to_latest_debian_rtbrick-onl_stretch_rtbrick-onl.sh"
   },
   "__defaults__": {
     "project": "rtbrick-libnss-tacplus",
@@ -38,7 +38,7 @@
     "containers": [
       {
         "name": "builder",
-        "image": "docker.rtbrick.net/devops/images/rtbrick/ubuntu-bionic-builder:latest",
+        "image": "docker.rtbrick.net/devops/images/rtbrick/ubuntu-bionic-builder",
         "compile_deps": [
           "libaudit-dev",
           "rtbrick-libtacplus-map",
@@ -69,6 +69,6 @@
     "pkg_services": [],
     "pkg_distribution": "ubuntu",
     "pkg_release": "bionic",
-	"upload_script": ".jenkins/jenkins_upload_to_latest_ubuntu_rtbrick-rbfs_bionic_rtbrick-rbfs.sh"
+    "upload_script": ".jenkins/jenkins_upload_to_latest_ubuntu_rtbrick-rbfs_bionic_rtbrick-rbfs.sh"
   }
 }
