@@ -62,9 +62,9 @@ Environment="GROUP={{ .RunAs.Group }}"
 ExecStart={{ .ServiceStartCmd }}
 
 # EMS (RBMS) Service Registration events:
-ExecStartPost=/bin/bash -c '[ -f "/usr/local/bin/rtbrick-ems-service-event" ] && { /usr/bin/python3 /usr/local/bin/rtbrick-ems-service-event -e start -s "{{ .ServiceName }}" -p "{{ .PackageName }}"; }; /bin/true;'
-ExecReload=/bin/bash -c '[ -f "/usr/local/bin/rtbrick-ems-service-event" ] && { /usr/bin/python3 /usr/local/bin/rtbrick-ems-service-event -e restart -s "{{ .ServiceName }}" -p "{{ .PackageName }}"; }; /bin/true;'
-ExecStopPost=/bin/bash -c '[ -f "/usr/local/bin/rtbrick-ems-service-event" ] && { /usr/bin/python3 /usr/local/bin/rtbrick-ems-service-event -e stop -s "{{ .ServiceName }}" -p "{{ .PackageName }}"; }; /bin/true;'
+ExecStartPost=+/bin/bash -c '[ -f "/usr/local/bin/rtbrick-ems-service-event" ] && { /usr/bin/python3 /usr/local/bin/rtbrick-ems-service-event -e start -s "{{ .ServiceName }}" -p "{{ .PackageName }}"; }; /bin/true;'
+ExecReload=+/bin/bash -c '[ -f "/usr/local/bin/rtbrick-ems-service-event" ] && { /usr/bin/python3 /usr/local/bin/rtbrick-ems-service-event -e restart -s "{{ .ServiceName }}" -p "{{ .PackageName }}"; }; /bin/true;'
+ExecStopPost=+/bin/bash -c '[ -f "/usr/local/bin/rtbrick-ems-service-event" ] && { /usr/bin/python3 /usr/local/bin/rtbrick-ems-service-event -e stop -s "{{ .ServiceName }}" -p "{{ .PackageName }}"; }; /bin/true;'
 
 # Logging stdout, stderr to a file (append mode):
 #     https://www.freedesktop.org/software/systemd/man/systemd.exec.html#StandardOutput=
