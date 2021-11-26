@@ -346,6 +346,8 @@ get_cont_by_name() {
 			printf "%s" "$cont_conf";
 			return 0;
 		}
+
+		i="$(( i + 1 ))";
 	done
 
 	return 1;
