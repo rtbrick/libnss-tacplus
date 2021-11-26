@@ -137,10 +137,12 @@ _docker="$(which podman)" || _docker="$(which docker)";	export _docker;
 _docker_exec="$_docker exec -t";			export _docker_exec;
 
 # Global variables.
+
 # DEFAULT_BUILD_SCRIPT is the script used when a build step (inside of a
 # container does not have a specific value for build_script.
 DEFAULT_BUILD_SCRIPT="${__jenkins_scripts_dir:-./.jenkins}/jenkins_build.sh";
 DEFAULT_PKG_SCRIPT="${__jenkins_scripts_dir:-./.jenkins}/jenkins_package.sh";
+DEFAULT_SONAR_SCRIPT="${__jenkins_scripts_dir:-./.jenkins}/jenkins_sonarqube.sh";
 #
 # DEFAULT_STEP_CONT defines the default container name in which steps like
 # package, test, upload will run if a specific container for them is not
@@ -150,6 +152,7 @@ DEFAULT_STEP_CONT="builder";
 # RTB_ITOOL_CONFIG is the location of the rtb-itool configuration file. It is
 # used to load the GITLAB_TOKEN in the environment if needed.
 RTB_ITOOL_CONFIG="$HOME/.config/rtb-itool/config.yml";
+
 # build_conf is the JSON file describing the build. It has a default value but
 # it can also be provided via the -C CLI option.
 build_conf="${__jenkins_scripts_dir:-./.jenkins}/jenkins_build_conf.json";
@@ -174,6 +177,10 @@ local_build="";				# If this is set via the -L CLI option
 docker_net_skip="";			# Skip configuring docker networks for containers.
 upload_force="0";			# Force the upload of the resulting package
 					# even if this is a local build.
+rebuild_force="0";			# Force a rebuild even if rtb-itool needbuild says that a package built at the same commit
+					# already exists. This is needed mostly for when tagging a repository with a specific version
+					# tag when we want to rebuild the package to have it with a nice version string. Disabled by
+					# default for most builds but forced by default for builds triggered by a git tag push.
 ssh_agent_fwd="0";			# Forward the local SSH Agent inside all containers.
 __global_debug="0";			# Debug flag. Can be specified multiple times.
 ME="jenkins.sh";			# Useful for log messages.
@@ -183,12 +190,16 @@ print_usage() {
 	[ -z "$whoami" ] && [ -n "${ME:-}" ] && whoami="$ME";
 	[ -z "$whoami" ] && whoami="jenkins.sh";
 
-	printf "\nUsage: %s [-d[d]] [-L [-W]] [-C build_conf_json ] -B build_name [-N build_job_hash] [-K] [-O] [-S build_step] [-T build|package|upload ]\n\n" "$whoami";
+	printf "\nUsage: %s [-d[d]] [-L [-W]] [-C build_conf_json ] -B build_name [-F] [-N build_job_hash] [-K] [-O] [-S build_step] [-T build|package|upload ]\n\n" "$whoami";
 	printf "\t-A\t\tForward the local SSH Agent inside all containers.\n";
 	printf "\t-L\t\tLocal build. Most of the times this is needed when running %s manually.\n" "$whoami";
 	printf "\t-W\t\tForce the upload of the package for local builds, for which normally we don't try to upload the package.\n";
 	printf "\t-C filename\tSpecify a different build config JSON file. Default: %s\n" "$build_conf";
 	printf "\t-B name\t\tMandatory. Select one of the builds from the build config JSON.\n";
+	printf "\t-F\t\tForce a rebuild even if rtb-itool needbuild says that a package built at the same commit\n";
+	printf "\t\t\talready exists. This is needed mostly for when tagging a repository with a specific version\n";
+	printf "\t\t\ttag when we want to rebuild the package to have it with a nice version string. Disabled by\n";
+	printf "\t\t\tdefault for most builds but forced by default for builds triggered by a git tag push.\n";
 	printf "\t-S build_step\tRun only one of the build steps. Default is to run all build steps.\n";
 	printf "\t\t\tNote that all the containers are still started even if build_step is specified\n";
 	printf "\t\t\tas they might provide some ancillary services (like a database server).\n";
@@ -200,7 +211,7 @@ print_usage() {
 }
 
 # Parse CLI options.
-args=$(getopt hdALWC:B:N:KOS:T: "$@") || {
+args=$(getopt hdALWC:B:FN:KOS:T: "$@") || {
 	>&2 echo "Invalid CLI options.";
 	>&2 print_usage "$@";
 	exit 2;
@@ -224,6 +235,8 @@ while [ $# -ne 0 ]; do
 			build_conf="$2"; shift; shift;;
 		-B)
 			build_name="$2"; shift; shift;;
+		-F)
+			rebuild_force="1"; shift;;
 		-N)
 			cleanup_hash="$2"; shift; shift;;
 		-K)
@@ -396,7 +409,7 @@ if [ "${gitlabActionType:-}" == "MERGE" ]; then
 		die "Some of the expected gitlab variables are not set !";
 	fi
 
-	logmsg "Build triggered by gitlab merge request !${gitlabMergeRequestIid}: ${gitlabSourceRepoName}:${gitlabSourceBranch} => ${gitlabTargetRepoName}:${gitlabTargetBranch}";
+	logmsg "Build triggered by gitlab merge request !${gitlabMergeRequestIid}: ${gitlabSourceRepoName}:${gitlabSourceBranch} => ${gitlabTargetRepoName}:${gitlabTargetBranch}" "$ME";
 
 	# It seems that Jenkins will checkout the master branch even for a
 	# merge request triggered build, so we need to checkout the source
@@ -412,7 +425,11 @@ if [ "${gitlabActionType:-}" == "MERGE" ]; then
 			| sed -E 's/^[[:space:]]*\*[[:space:]]*//g')";
 	GIT_COMMIT="$($_git rev-parse HEAD)";
 
-	[ "_$BRANCH" == "_$gitlabSourceBranch" ] || die "Can't switch to branch: $gitlabSourceBranch";
+	[ "_$BRANCH" == "_$gitlabSourceBranch" ] || {
+		detachedHeadRE="\(HEAD detached at $(echo "$gitlabMergeRequestLastCommit" | cut -c 1-6)[0-9a-f]*\)";
+		regex "_$BRANCH" "_$detachedHeadRE" || die "Can't switch to branch: $gitlabSourceBranch";
+		warnmsg "Git status: $BRANCH" "$ME";
+	}
 	[ "_$GIT_COMMIT" == "_$gitlabMergeRequestLastCommit" ] || die "Latest commit doesn't match: $GIT_COMMIT != $gitlabMergeRequestLastCommit";
 
 	export BRANCH;
@@ -462,6 +479,7 @@ if [ -z "$local_build" ] && [ "$BRANCH" == "master" ]; then
 	if [ "${gitlabActionType:-}" == "TAG_PUSH" ]; then
 		if [ -n "$tag_mmr" ] && mmr_compare "$ver_mmr" "$tag_mmr"; then
 			logmsg "Found matching tag: $tag_mmr" "$ME";
+			rebuild_force="1";
 		else
 			errmsg "tag version: $tag_mmr != build config version: $ver_mmr";
 			echo "While building from master branch we must have a tag";
@@ -527,6 +545,24 @@ fi
 build_job_hash="$(echo "$proj $build_name $ver_str" | $_sha256sum | cut -c '1-12')";
 logmsg "Running for project: ${proj}; build_name: ${build_name}; version: ${ver_str}; build_job_hash: ${build_job_hash}" "$ME";
 
+# Identify the apt resolv log file and start with an empty one (to avoid
+# re-use of old data from previous builds).
+apt_resolv_script="jenkins_resolve_apt_dep.sh";
+apt_resolv_log="apt_resolv.log";
+
+if [ -x "./$apt_resolv_script" ]; then
+	apt_resolv_script="./$apt_resolv_script";
+else
+	if [ -x "${__jenkins_scripts_dir:-./.jenkins}/$apt_resolv_script" ]; then
+		apt_resolv_script="${__jenkins_scripts_dir:-./.jenkins}/$apt_resolv_script";
+	fi
+fi
+[ -d "${__jenkins_scripts_dir:-./.jenkins}" ]	\
+	&& apt_resolv_log="${__jenkins_scripts_dir:-./.jenkins}/${apt_resolv_log}";
+
+apt_resolv_log_per_cont="${apt_resolv_log}.${DEFAULT_STEP_CONT}";
+echo -n > "$apt_resolv_log_per_cont";
+
 # rtb-itool needs a valid GITLAB_TOKEN to be able to do repository read operations
 # against gitlab.rtbrick.net . In the case of a Jenkins build a valid token should
 # have been injected into the environment. But in the case of a local build we
@@ -543,7 +579,7 @@ logmsg "Running for project: ${proj}; build_name: ${build_name}; version: ${ver_
 	}
 }
 
-# Identify if current build creates a package.
+# Identify if the current build creates a package.
 pkg_name="$(get_build_key_or_def "$build_name" "pkg_name" || true)";
 [ -n "$pkg_name" ] && [ -z "$local_build" ] && {
 	pkg_group="$(get_build_key_or_def "$build_name" "pkg_group")";
@@ -552,26 +588,59 @@ pkg_name="$(get_build_key_or_def "$build_name" "pkg_name" || true)";
 	pkg_distribution="$(get_build_key_or_def "$build_name" "pkg_distribution" || echo "$OS_RELEASE_ID")";
 	pkg_release="$(get_build_key_or_def "$build_name" "pkg_release" || echo "$OS_RELEASE_VERSION_CODENAME")";
 
-	existing_pkg="$($_rtb_itool pkg needbuild --log-level=info	\
-				--as-deb-dep				\
-				--branch="$BRANCH"			\
-				--pkg-distribution="$pkg_distribution"	\
-				--pkg-release="$pkg_release"		\
-				--pkg-group="$pkg_group"		\
+	containers="$(get_build_key_or_def "$build_name" "containers")";
+	cont_conf="$(get_cont_by_name "$containers" "$DEFAULT_STEP_CONT")";
+	cont_deps="$(get_dict_key "$cont_conf" "compile_deps" || true)";
+	[ -z "$cont_deps" ] && cont_deps="[]";
+	cont_deps_len="$(echo "$cont_deps" | $_jq -c '. | values | length')";
+	if [ "$cont_deps_len" -gt "0" ]; then
+		deps_resolved="$(/usr/bin/env						\
+			"DEBIAN_FRONTEND=noninteractive"				\
+			"GITLAB_TOKEN=${GITLAB_TOKEN:-}"				\
+			"BRANCH=$BRANCH"						\
+			"BRANCH_SANITIZED=$BRANCH_SANITIZED"				\
+			"__jenkins_scripts_dir=${__jenkins_scripts_dir:-./.jenkins}"	\
+			"pkg_name=$pkg_name"						\
+			"pkg_group=$pkg_group"						\
+			"pkg_distribution=$pkg_distribution"				\
+			"pkg_release=$pkg_release"					\
+			$apt_resolv_script "--with-dev" "$cont_deps")";
+
+		echo "$deps_resolved" > "$apt_resolv_log_per_cont";
+		logmsg "DEBUG: APT resolv log $apt_resolv_log_per_cont:" "$ME";
+		cat "$apt_resolv_log_per_cont";
+	fi
+
+	existing_pkg="$($_rtb_itool pkg needbuild --log-level=debug		\
+				--as-deb-dep					\
+				--branch="$BRANCH"				\
+				--pkg-distribution="$pkg_distribution"		\
+				--pkg-release="$pkg_release"			\
+				--pkg-group="$pkg_group"			\
+				--dependencies "$apt_resolv_log_per_cont"	\
 				"$pkg_name")" && {
 
-		existing_version="$(echo "$existing_pkg" | awk -F '=' '{print $2;}')";
-		[ -z "$local_build" ] && echo "$existing_version" > ".jenkins_build_version.txt";
-		logmsg "Finished successfully by using previous package: $existing_pkg ." "$ME";
+		logmsg "DEBUG: existing package:" "$ME"; echo "$existing_pkg";
 
-		prom_set "need_build" "0";
-		prom_set "end_time_job" "$(date '+%s')";
-		prom_update_duration "duration_total";
-		prom_set "success_job" "1";
-		prom_push "$proj";
-		logmsg "Prometheus metrics pushed" "$ME";
-		exit 0;
+		existing_version="$(echo "$existing_pkg" | grep -E -m 1 "^${pkg_name}=" | awk -F '=' '{print $2;}')";
+
+		if [ "$rebuild_force" -eq "0" ]; then
+			[ -z "$local_build" ] && echo "$existing_version" > ".jenkins_build_version.txt";
+			logmsg "Finished successfully by using previous package: $existing_version ." "$ME";
+
+			prom_set "need_build" "0";
+			prom_set "end_time_job" "$(date '+%s')";
+			prom_update_duration "duration_total";
+			prom_set "success_job" "1";
+			prom_push "$proj";
+			logmsg "Prometheus metrics pushed" "$ME";
+			exit 0;
+		else
+			logmsg "Ignoring previous package: $existing_version due to rebuild_force=1 ." "$ME";
+		fi
 	}
+
+	logmsg "DEBUG: existing package:" "$ME"; echo "$existing_pkg";
 
 	logmsg "No previous package found or outdated previous package" "$ME";
 }
@@ -594,6 +663,14 @@ if [ -n "$highlevel_step" ] && [ "_$highlevel_step" != "_build" ]; then
 	skip_build_steps="1";
 	logmsg "Skipping all build steps due to high level step being '$highlevel_step'" "$ME";
 fi
+
+# Get SonarQube configuration variables. We `get` them here and not later 
+# (right before the SonarQube step) as in the `lang == c` case when the 
+# compilation commands need to be prefixed with the SonarQube wrapper script.
+sonar_conf="$(get_build_key_or_def "$build_name" "sonar" || true)";
+sonar_token="${SONARQUBE_TOKEN:-}";
+sonar_script="$(get_build_key_or_def "$build_name" "sonar_script" || true)";
+[ -z "$sonar_script" ] && sonar_script="$DEFAULT_SONAR_SCRIPT";
 
 i="0";
 while [ "$i" -lt "$build_steps_len" ] && [ "$skip_build_steps" -eq "0" ]; do
@@ -649,11 +726,13 @@ while [ "$i" -lt "$build_steps_len" ] && [ "$skip_build_steps" -eq "0" ]; do
 			-e "ver_mmr=$ver_mmr"				\
 			-e "ver_str=$ver_str"				\
 			-e "__global_debug=$__global_debug"		\
+			-e "GITLAB_TOKEN=$GITLAB_TOKEN"			\
 			-e "BRANCH=$BRANCH"				\
 			-e "BRANCH_SANITIZED=$BRANCH_SANITIZED"		\
 			-e "GIT_COMMIT=$GIT_COMMIT"			\
 			-e "GIT_COMMIT_TS=$GIT_COMMIT_TS"		\
 			-e "GIT_COMMIT_DATE=$GIT_COMMIT_DATE"		\
+			-e "sonar_conf=$sonar_conf"			\
 			"$dckr_name"					\
 			/bin/sh -c -- "$build_script";
 	else
@@ -812,6 +891,7 @@ if [ -n "$upload_script" ]; then
 				-e "ver_mmr=$ver_mmr"			\
 				-e "ver_str=$ver_str"			\
 				-e "__global_debug=$__global_debug"	\
+				-e "GITLAB_TOKEN=$GITLAB_TOKEN"		\
 				-e "BRANCH=$BRANCH"			\
 				-e "GIT_COMMIT=$GIT_COMMIT"		\
 				-e "GIT_COMMIT_TS=$GIT_COMMIT_TS"	\
@@ -826,6 +906,48 @@ else
 	logmsg "upload_script is empty, skipping upload step" "$ME";
 fi
 prom_update_duration "duration_upload";
+
+prom_add_duration "duration_sonarqube" "Duration of the SonarQube step in seconds." "step=\"sonarqube\"" "";
+# Run the SonarQube step.
+if [ -n "$sonar_conf" ] && [ "$sonar_conf" != "{}" ]; then
+	if [ -z "$highlevel_step" ] || [ "_$highlevel_step" == "_sonarqube" ]; then
+		if [ -n "$sonar_token" ]; then
+			logmsg "Running SonarQube step inside container '$dckr_name'" "$ME";
+		    $_docker_exec \
+				-e "build_name=$build_name" \
+				-e "build_conf=$build_conf" \
+				-e "dckr_name=$dckr_name" \
+				-e "local_build=$local_build" \
+				-e "proj=$proj" \
+				-e "build_ts=$build_ts" \
+				-e "build_date=$build_date" \
+				-e "build_job_hash=$build_job_hash" \
+				-e "ver_mmr=$ver_mmr" \
+				-e "ver_str=$ver_str" \
+				-e "__global_debug=$__global_debug" \
+				-e "BRANCH=$BRANCH" \
+				-e "SONARQUBE_TOKEN=$SONARQUBE_TOKEN" \
+				-e "GIT_COMMIT=$GIT_COMMIT" \
+				-e "GIT_COMMIT_TS=$GIT_COMMIT_TS" \
+				-e "GIT_COMMIT_DATE=$GIT_COMMIT_DATE" \
+				-e "sonar_conf=$sonar_conf" \
+				-e "sonar_version=$_short_commit" \
+				-e "gitlabActionType=${gitlabActionType:-}" \
+				-e "gitlabMergeRequestIid=${gitlabMergeRequestIid:-}" \
+				-e "gitlabSourceBranch=${gitlabSourceBranch:-}" \
+				-e "gitlabTargetBranch=${gitlabTargetBranch:-}" \
+    			"$dckr_name" \
+				/bin/sh -c -- "$sonar_script";
+		else
+			warnmsg "SONARQUBE_TOKEN is not set, skipping SonarQube high level step" "$ME";
+		fi
+	else
+		logmsg "Skipping SonarQube high level step" "$ME";
+	fi
+else
+	logmsg "SonarQube config is is empty, skipping SonarQube step" "$ME";
+fi
+prom_update_duration "duration_sonarqube";
 
 [ "${keep_containers:-0}" -ne "1" ] && {
 	prom_add_duration "duration_cleanup" "Duration of the cleanup step in seconds." "step=\"cleanup\"" "";

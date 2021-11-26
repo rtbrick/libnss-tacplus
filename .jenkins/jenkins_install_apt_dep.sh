@@ -74,11 +74,21 @@ for x in "${pkgs[@]}"; do
 	}
 
 	logmsg "Downloading rtbrick package '$x'" "$ME";
-	$_apt_get download -yqq "$x";
+	out="$($_apt_get download -yqq "$x")" || {
+		rc="$?";
+		errmsg "Download of '$x' failed" "$ME";
+		echo "$out";
+		exit "$rc";
+	};
 
 	deb="$(ls *.deb)";
 	logmsg "Installing rtbrick package '$deb'" "$ME";
-	$_dpkg --force-depends --force-confnew --force-downgrade -i "$deb";
+	out="$($_dpkg --force-depends --force-confnew --force-downgrade -i "$deb")" || {
+		rc="$?";
+		errmsg "Installation of '$deb' failed" "$ME";
+		echo "$out";
+		exit "$rc";
+	};
 
 	rm *.deb;
 done

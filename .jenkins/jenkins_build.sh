@@ -38,12 +38,35 @@ trap 'trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
 	[ "${BASH_VERSION:-0}" != "0" ] && set -o functrace;
 }
 
+# Global definitions.
+
+# SONARQUBE_BUILD_WRAPPER is the wrapper script needed for SonarQube analysis
+# of C projects (https://docs.sonarqube.org/latest/analysis/languages/cfamily/).
+SONARQUBE_BUILD_WRAPPER="build-wrapper-linux-x86-64";
+# SONARQUBE_WRAPPER_OUTDIR is the directory where the SonarQube build wrapper
+# script will write it's output if the build wrapper is used.
+SONARQUBE_WRAPPER_OUTDIR=".sonarqube_wrapper_outdir";
+
 # Dependencies on other programs which might not be installed. Here we rely on
 # values discovered and passed on by the calling script.
-# shellcheck disable=SC2269
-_jq="$_jq";
+_jq="${_jq:-$(which jq) -er}";
 
 ME="jenkins_build.sh";	# Useful for log messages.
+
+sonar_wrapper="";
+sonar_conf="${sonar_conf:-}";
+sonar_lang="$(get_dict_key "$sonar_conf" "lang" || true)";
+[ -n "$sonar_lang" ] && {
+	logmsg "Language set to '$sonar_lang' for SonarQube analysis" "$ME";
+	if [ "$sonar_lang" == "c" ] || [ "$sonar_lang" == "C" ]; then
+		sonar_wrapper="$(which "$SONARQUBE_BUILD_WRAPPER" || true)";
+		if [ -z "$sonar_wrapper" ]; then
+			warnmsg "SonarQube wrapper script required for language '$sonar_lang' but missing" "$ME";
+		else
+			sonar_wrapper="$sonar_wrapper --out-dir $SONARQUBE_WRAPPER_OUTDIR";
+		fi
+	fi
+}
 
 ####
 #### Build/compilation commands (cmake, make, etc.) taken from the build
@@ -54,6 +77,14 @@ ME="jenkins_build.sh";	# Useful for log messages.
 # commands. Could someone use such a variable name in the build commands ? You
 # can never be sure.
 ____initial_dir="$PWD";
+
+# We need to detect which build commands are `make` (versus other commands like
+# `cmake`. For `make` we might need to run them through the SonarQube build
+# wrapper.
+make_cmd_regexp='^[[:space:]]*make';
+# But we don't want to run ALL make commands through the wrapper. This could
+# also be '^[[:space:]]*make[[:space:]]+(test|clean)' if we would want to exact.
+make_ignore_regexp='(test|clean)';
 
 # Avoid shell check SC2154 `referenced but not assigned` but stil rely on value
 # passed on by calling script. If variable is not set by calling script this
@@ -67,8 +98,13 @@ while [ "$i" -lt "$build_commands_len" ]; do
 		| grep -Eiv '^[[:blank:]]*null[[:blank:]]*$')";
 
 	[ -n "$cmd" ] && {
-		logmsg "Executing build command #$i '$cmd' ..." "$ME";
-		eval " $cmd;";
+		if [[ "$cmd" =~ $make_cmd_regexp ]] && [[ ! "$cmd" =~ $make_ignore_regexp ]]; then
+			logmsg "Executing build command #$i '$cmd' through SonarQube build wrapper ..." "$ME";
+			eval " $sonar_wrapper $cmd;";
+		else
+			logmsg "Executing build command #$i '$cmd' ..." "$ME";
+			eval " $cmd;";
+		fi
 	}
 
 	i="$(( i + 1 ))";
