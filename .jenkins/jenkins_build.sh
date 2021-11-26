@@ -97,15 +97,27 @@ while [ "$i" -lt "$build_commands_len" ]; do
 	cmd="$(echo "$build_commands" | $_jq -c ". | values | .[$i]"	\
 		| grep -Eiv '^[[:blank:]]*null[[:blank:]]*$')";
 
-	[ -n "$cmd" ] && {
-		if [[ "$cmd" =~ $make_cmd_regexp ]] && [[ ! "$cmd" =~ $make_ignore_regexp ]]; then
-			logmsg "Executing build command #$i '$cmd' through SonarQube build wrapper ..." "$ME";
-			eval " $sonar_wrapper $cmd;";
-		else
-			logmsg "Executing build command #$i '$cmd' ..." "$ME";
-			eval " $cmd;";
-		fi
+	[ -z "$cmd" ] && {
+		warnmsg "Ignoring empty build command #$i" "$ME";
+
+		i="$(( i + 1 ))";
+		continue;
 	}
+
+	[ -n "$sonar_conf" ] && [ -n "$sonar_wrapper" ]		\
+		&& [[ "$cmd" =~ $make_cmd_regexp ]]		\
+		&& [[ ! "$cmd" =~ $make_ignore_regexp ]]	\
+		&& {
+
+		logmsg "Executing build command #$i '$cmd' through SonarQube build wrapper ..." "$ME";
+		eval " $sonar_wrapper $cmd;";
+
+		i="$(( i + 1 ))";
+		continue;
+	}
+
+	logmsg "Executing build command #$i '$cmd' ..." "$ME";
+	eval " $cmd;";
 
 	i="$(( i + 1 ))";
 done

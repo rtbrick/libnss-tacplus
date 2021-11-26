@@ -936,7 +936,7 @@ if [ -n "$sonar_conf" ] && [ "$sonar_conf" != "{}" ]; then
 				-e "gitlabMergeRequestIid=${gitlabMergeRequestIid:-}" \
 				-e "gitlabSourceBranch=${gitlabSourceBranch:-}" \
 				-e "gitlabTargetBranch=${gitlabTargetBranch:-}" \
-    			"$dckr_name" \
+    				"$dckr_name" \
 				/bin/sh -c -- "$sonar_script";
 		else
 			warnmsg "SONARQUBE_TOKEN is not set, skipping SonarQube high level step" "$ME";
