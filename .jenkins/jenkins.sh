@@ -613,6 +613,7 @@ pkg_name="$(get_build_key_or_def "$build_name" "pkg_name" || true)";
 
 	existing_pkg="$($_rtb_itool pkg needbuild --log-level=debug		\
 				--as-deb-dep					\
+				--build-name="$build_name"			\
 				--branch="$BRANCH"				\
 				--pkg-distribution="$pkg_distribution"		\
 				--pkg-release="$pkg_release"			\
