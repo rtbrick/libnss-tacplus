@@ -127,11 +127,8 @@ cp "$PAK_FILES_LOCATION"/*-pak ./ || true;
 
 # Generate description-pak
 _git_clone_log="${__jenkins_scripts_dir:-./.jenkins}/git_clone_update.log";
-if [ ! -f "$_git_clone_log" ]; then
-  _git_clone_log=""
-fi
-
-$_rtb_itool pkg struct gen						\
+[ -f "$_git_clone_log" ] || _git_clone_log="";
+_pkg_rtb_metadata="$($_rtb_itool pkg struct gen						\
 	--description "$_pkg_descr"					\
 	--version "$_ver_str"						\
 	--branch "$BRANCH"						\
@@ -142,7 +139,8 @@ $_rtb_itool pkg struct gen						\
 	--build_date "$_build_date"					\
 	--build_job_hash "$_build_job_hash"				\
 	--git_dependencies "$_git_clone_log"				\
-	--dependencies "$apt_resolv_log_per_cont" > description-pak;
+	--dependencies "$apt_resolv_log_per_cont")";
+printf " %s\n" "$_pkg_rtb_metadata" > "description-pak";
 
 # Apart from running `make install` we might need to install some dynamically
 # generated files, like systemd services and/or config files. We will gather
@@ -373,6 +371,7 @@ declare -a _checkinstall_args=("--type=debian"			\
 	"--requires=$_pkg_requires"				\
 	"--pkgname=$checkinstall_pkg_name"			\
 	"--pkgversion=$_ver_str"				\
+	"--summary=$_pkg_descr"					\
 );
 
 [ -n "$_pkg_provides" ]	&& _checkinstall_args+=("--provides=$_pkg_provides");

@@ -48,6 +48,14 @@ _getent="$(which getent)";
 
 ME="jenkins_install_apt_dep.sh";	# Useful for log messages.
 
+rtb_fake_install="0";
+
+# Verify first CLI flag.
+[ "_${1:-}" == "_--rtb-fake-install" ] && {
+	rtb_fake_install="1";
+	shift;
+}
+
 pkgs=("$@");
 
 initial_dir="$PWD";
@@ -60,7 +68,7 @@ cd "$tmp_dir";
 
 for x in "${pkgs[@]}"; do
 	# Check if this is an rtbrick package dependency or not.
-	echo "$x" | grep -E '^rtbrick-' 2>/dev/null 1>/dev/null || {
+	regex "$x" '^rtbrick-.+' >/dev/null || {
 		logmsg "Installing normal package '$x'" "$ME";
 		out="$($_apt_get install -yqq --allow-downgrades	\
 			--no-install-recommends "$x")" || {
@@ -73,6 +81,11 @@ for x in "${pkgs[@]}"; do
 		continue;
 	}
 
+	[ "$rtb_fake_install" -gt "0" ] && {
+		logmsg "FAKE install of rtbrick package '$x'" "$ME";
+		continue;
+	}
+
 	logmsg "Downloading rtbrick package '$x'" "$ME";
 	out="$($_apt_get download -yqq "$x")" || {
 		rc="$?";
@@ -81,7 +94,7 @@ for x in "${pkgs[@]}"; do
 		exit "$rc";
 	};
 
-	deb="$(ls *.deb)";
+	deb="$(ls ./*.deb)";
 	logmsg "Installing rtbrick package '$deb'" "$ME";
 	out="$($_dpkg --force-depends --force-confnew --force-downgrade -i "$deb")" || {
 		rc="$?";
@@ -90,7 +103,7 @@ for x in "${pkgs[@]}"; do
 		exit "$rc";
 	};
 
-	rm *.deb;
+	rm ./*.deb;
 done
 
 cd "$initial_dir";

@@ -1225,10 +1225,12 @@ docker_prepare() {
 
 		local cont_deps="";
 		local cont_deps_len="";
+		local cont_deps_rtb_fake_inst="";
 
 		cont_deps="$(get_dict_key "$cont_conf" "compile_deps" || true)";
 		[ -z "$cont_deps" ] && cont_deps="[]";
 		cont_deps_len="$(echo "$cont_deps" | $_jq -c '. | values | length')";
+		cont_deps_rtb_fake_inst="$(get_dict_key "$cont_conf" "compile_deps_rtb_fake_install" || true)";
 		if [ "$cont_deps_len" -gt "0" ]; then
 			logmsg "Installing dependencies in container '$dckr_name'" \
 				"docker_prepare";
@@ -1311,9 +1313,13 @@ docker_prepare() {
 				done
 			fi
 
+			local priv_apt_install_script="$apt_install_script";
+			[ "_$cont_deps_rtb_fake_inst" == "_true" ]	\
+				&& priv_apt_install_script="$apt_install_script --rtb-fake-install";
+			# shellcheck disable=SC2086
 			$_docker_exec -e "DEBIAN_FRONTEND=noninteractive"			\
 				"$dckr_name"							\
-				$apt_install_script "${deps_to_be_installed[@]}";
+				$priv_apt_install_script "${deps_to_be_installed[@]}";
 		fi
 
 		i="$(( i + 1 ))";
