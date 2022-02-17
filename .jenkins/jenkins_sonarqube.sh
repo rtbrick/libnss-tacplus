@@ -31,7 +31,7 @@ trap 'trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
 	echo "---------------------------------------------------------------";
 	env;
 	echo "---------------------------------------------------------------";
-}
+} >&2;
 [ "${__global_debug:-0}" -gt "1" ] && {
 	set -x;
 	# functrace is bash specific.
@@ -42,6 +42,11 @@ trap 'trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
 
 # SONARQUBE_URL is the SonarQube server URL.
 SONARQUBE_URL="https://sqube.rtbrick.net";
+# SONARQUBE_WORKDIR is the value for the `sonar.working.directory` CLI flag
+# which sets the working directory for the analysis. Path must be relative,
+# and unique for each project. Beware: the specified folder is deleted before
+# each analysis.
+SONARQUBE_WORKDIR=".scannerwork";
 # SONARQUBE_WRAPPER_OUTDIR is the directory where the SonarQube build wrapper
 # script will write it's output if the build wrapper is used.
 SONARQUBE_WRAPPER_OUTDIR=".sonarqube_wrapper_outdir";
@@ -52,6 +57,7 @@ _git="${_git:-$(which git)}";
 _jq="${_jq:-$(which jq) -er}";
 _nproc="$(which nproc)";
 
+# shellcheck disable=SC2034
 ME="jenkins_sonarqube.sh";	# Useful for log messages.
 
 proj="${proj:-}"; [ -z "$proj" ] && die "Cannot run a SonarQube analysis without the 'proj' variable.";
@@ -62,6 +68,8 @@ sonarqube_token="${SONARQUBE_TOKEN:-}"; [ -z "$sonarqube_token" ] && die "Cannot
 sonar_scanner="$(which sonar-scanner || true)"; [ -z "$sonar_scanner" ] && die "Cannot run a SonarQube analysis without sonar-scanner.";
 sonar_conf="${sonar_conf:-}"; [ -z "$sonar_conf" ] && die "Cannot run a SonarQube analysis without a SonarQube config.";
 sonar_lang="$(get_dict_key "$sonar_conf" "lang" || true)";
+# SonarQube `sources` will have a default of `.` meaning current directory.
+sonar_sources="$(get_dict_key "$sonar_conf" "sources" || echo ".")";
 sonar_exclusions="$(get_dict_key "$sonar_conf" "exclusions" || true)";
 sonar_version="${sonar_version:-}"; [ -z "$sonar_version" ] && die "Cannot run a SonarQube analysis without a version.";
 
@@ -75,30 +83,31 @@ sonar_proj_name="$(get_dict_key "$sonar_conf" "projectName" || true)";
 }
 sonar_proj_key="$(get_dict_key "$sonar_conf" "projectKey" || true)";
 [ -z "$sonar_proj_key" ] && {
-	sonar_proj_key="$(echo "$sonar_proj_name"	\
-				| tr -c '[:alnum:]' '_'	\
-				| sed -E 's/_{2,}/_/g'	\
+	sonar_proj_key="$(echo "$sonar_proj_name"			\
+				| tr -c '[:alnum:]' '_'			\
+				| sed -E 's/_{2,}/_/g'			\
 				| sed -E 's/_+$//g')";
 }
 
 declare -a sonar_cli_args=(
-    "-Dsonar.host.url=$SONARQUBE_URL" \
-    "-Dsonar.login=$sonarqube_token" \
-	"-Dsonar.projectKey=$sonar_proj_key" \
-	"-Dsonar.projectName=$sonar_proj_name" \
-	"-Dsonar.projectVersion=$sonar_version" \
-    "-Dsonar.sources=."
+	"-Dsonar.host.url=$SONARQUBE_URL"				\
+	"-Dsonar.login=$sonarqube_token"				\
+	"-Dsonar.projectKey=$sonar_proj_key"				\
+	"-Dsonar.projectName=$sonar_proj_name"				\
+	"-Dsonar.projectVersion=$sonar_version"				\
+	"-Dsonar.working.directory=$SONARQUBE_WORKDIR"			\
+	"-Dsonar.sources=$sonar_sources"				\
 );
-
-[ -n "$sonar_lang" ] && [ "$sonar_lang" == "c" ] || [ "$sonar_lang" == "C" ] && {
-	sonar_cli_args+=("-Dsonar.cfamily.cache.enabled=false"						\
-		"-Dsonar.cfamily.build-wrapper-output=$SONARQUBE_WRAPPER_OUTDIR"	\
-		"-Dsonar.cfamily.threads=$($_nproc)"							\
-	);
-}
 
 [ -n "$sonar_exclusions" ] && {
 	sonar_cli_args+=("-Dsonar.exclusions=$sonar_exclusions");
+}
+
+[ -n "$sonar_lang" ] && [ "$sonar_lang" == "c" ] || [ "$sonar_lang" == "C" ] && {
+	sonar_cli_args+=("-Dsonar.cfamily.cache.enabled=false"				\
+		"-Dsonar.cfamily.build-wrapper-output=$SONARQUBE_WRAPPER_OUTDIR"	\
+		"-Dsonar.cfamily.threads=$($_nproc)"					\
+	);
 }
 
 # Check if this build was triggered by a Gitlab merge request.
@@ -111,6 +120,28 @@ if [ "${gitlabActionType:-}" == "MERGE" ]; then
 else
 	sonar_cli_args+=("-Dsonar.branch.name=$branch");
 fi
+
+# Get any other keys from the embedded SonarQube config and turn them into
+# CLI options. We need to exclude keys that we have already handled or any
+# custom keys that are not actually valid SonarQube options (like `lang`).
+# NOTE: grep will return an error if the output is empty (all lines have been
+# filtered).
+keys="$(echo "$sonar_conf" | $_jq 'keys[]'		\
+	| grep -E -iv '^lang$'				\
+	| grep -E -iv '^host\.url'			\
+	| grep -E -iv '^login'				\
+	| grep -E -iv '^project(Key|Name|Version)'	\
+	| grep -E -iv '^working\.directory'		\
+	| grep -E -iv '^sources'			\
+	| grep -E -iv '^exclusions'			\
+	| grep -E -iv '^pullrequest'			\
+	| grep -E -iv '^cfamily\.cache\.enabled'	\
+	| grep -E -iv '^cfamily\.build-wrapper-output'	\
+	| grep -E -iv '^cfamily\.threads' || true)";
+for k in $keys; do
+	v="$(echo "$sonar_conf" | $_jq ".\"$k\"")";
+	sonar_cli_args+=("-Dsonar.${k}=${v}");
+done
 
 ####
 #### Run the SonarQube analysis.

@@ -122,6 +122,7 @@ _hostname="$(which hostname)"		export _hostname;
 _jq="$(which jq) -er";			export _jq;
 _mktemp="$(which mktemp)";		export _mktemp;
 _perl="$(which perl)";			export _perl;
+_rtb_itool="${_rtb_itool:-$(command -v rtb-itool-jenkins || command -v rtb-itool)}";
 _sha256sum="$(which sha256sum || which sha256)"; export _sha256sum;
 
 # We can't actually check for the existence of the docker command since this
@@ -1227,6 +1228,8 @@ docker_prepare() {
 		local cont_deps_len="";
 		local cont_deps_rtb_fake_inst="";
 
+		cont_deps_with_dev="$(get_dict_key "$cont_conf" "compile_deps_with_dev" || true)";
+		[ "_$cont_deps_with_dev" == "_true" ] && apt_resolv_script="$apt_resolv_script --with-dev";
 		cont_deps="$(get_dict_key "$cont_conf" "compile_deps" || true)";
 		[ -z "$cont_deps" ] && cont_deps="[]";
 		cont_deps_len="$(echo "$cont_deps" | $_jq -c '. | values | length')";
@@ -1282,10 +1285,11 @@ docker_prepare() {
 				# Re-use the contents of the per-container APT
 				# resolv log as it was probably already done
 				# in jenkins.sh .
-				local d="";
-				for d in $(cat "$apt_resolv_log_per_cont"); do
-					deps_to_be_installed+=("$d");
-				done
+				local _d="";
+				local _comment="";
+				while read -r _d _comment; do
+					deps_to_be_installed+=("$_d");
+				done < "$apt_resolv_log_per_cont";
 			else
 				# Resolving the exact dependency version needs
 				# to happen inside the respective container.
@@ -1299,12 +1303,13 @@ docker_prepare() {
 					-e "BRANCH=$BRANCH"						\
 					-e "BRANCH_SANITIZED=$BRANCH_SANITIZED"				\
 					-e "__jenkins_scripts_dir=${__jenkins_scripts_dir:-./.jenkins}"	\
+					-e "_rtb_itool=$_rtb_itool"					\
 					-e "pkg_name=$pkg_name"						\
 					-e "pkg_group=$pkg_group"					\
 					-e "pkg_distribution=$pkg_distribution"				\
 					-e "pkg_release=$pkg_release"					\
 					"$dckr_name"							\
-					$apt_resolv_script "--with-dev" "$cont_deps")";
+					$apt_resolv_script "$cont_deps")";
 
 				local d="";
 				for d in $deps_resolved; do

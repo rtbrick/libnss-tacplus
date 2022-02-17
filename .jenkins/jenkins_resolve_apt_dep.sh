@@ -31,7 +31,7 @@ trap 'trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
 	echo "---------------------------------------------------------------";
 	env;
 	echo "---------------------------------------------------------------";
-}
+} >&2;
 [ "${__global_debug:-0}" -gt "1" ] && {
 	set -x;
 	# functrace is bash specific.
@@ -40,8 +40,8 @@ trap 'trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
 
 # Dependencies on other programs which might not be installed. Here we might
 # rely on values discovered and passed on by the calling script.
-_rtb_itool="${_rtb_itool:-$(command -v rtb-itool)}";
-_rtb_itool_pkg_resolve="$_rtb_itool pkg resolve";
+_rtb_itool="${_rtb_itool:-$(command -v rtb-itool-jenkins || command -v rtb-itool)}";
+_rtb_itool_pkg_resolve="$_rtb_itool pkg resolve --as-deb-dep --with-json --bubble --latest";
 _jq="${_jq:-$(command -v jq) -er}";
 
 ME="jenkins_resolve_apt_dep.sh";	# Useful for log messages.
@@ -63,7 +63,7 @@ deps_len="$(echo "$deps_json" | $_jq -c '. | values | length')";
 # shellcheck disable=SC2269
 GITLAB_TOKEN="$GITLAB_TOKEN";
 # shellcheck disable=SC2269
-BRANCH_SANITIZED="$BRANCH_SANITIZED";
+BRANCH="$BRANCH";
 # shellcheck disable=SC2269
 pkg_name="$pkg_name";
 # shellcheck disable=SC2269
@@ -92,18 +92,25 @@ while [ "$i" -lt "$deps_len" ]; do
 				die "In pkg group override case: pkg_group_override='$pkg_group_override' dep='$dep'";
 			fi
 
-			dep_resolved="$($_rtb_itool_pkg_resolve --as-deb-dep	\
-				--bubble --latest				\
-				--version "$BRANCH_SANITIZED"			\
-				--pkg-distribution "$pkg_distribution"		\
-				--pkg-release "$pkg_release"			\
-				--pkg-group "$pkg_group_override"		\
-				"$dep")";
+			dep_resolved="$($_rtb_itool_pkg_resolve			\
+				--branch "$BRANCH"				\
+				--distribution "$pkg_distribution"		\
+				--release "$pkg_release"			\
+				--component "$pkg_group_override"		\
+				"$dep")" || {
 
-			for d in $dep_resolved; do
-				logmsg "rtbrick package dependency with pkg group override '$pkg_group_override' resolved to: [$d]"  "$ME";
-				result+=("$d");
-			done
+				die "Failed to resolve dependency in pkg group override case: pkg_group_override='$pkg_group_override' dep='$dep'";
+			}
+
+			# each line in the rtb-itool result will be in the format:
+			# pkg=ver # {"json": "representation", "of": "package"}
+			_d="";
+			_comment="";
+			while read -r _d _comment; do
+				logmsg "rtbrick package dependency with pkg group override '$pkg_group_override' resolved to: [$_d]"  "$ME";
+				[ -n "$_comment" ] && _d="$_d $_comment";
+				result+=("$_d");
+			done <<< "$dep_resolved";
 		;;
 
 		rtbrick-*)
@@ -123,19 +130,27 @@ done
 
 deps_resolved="";
 [ "${#deps_to_be_resolved[@]}" -gt "0" ] && {
-	deps_resolved=$($_rtb_itool_pkg_resolve --log-level=debug --as-deb-dep	\
-		--bubble --latest				\
-		--version "$BRANCH_SANITIZED"			\
-		--pkg-distribution "$pkg_distribution"		\
-		--pkg-release "$pkg_release"			\
-		--pkg-group "$pkg_group"			\
-		"${deps_to_be_resolved[@]}");
+	deps_resolved=$($_rtb_itool_pkg_resolve			\
+		--branch "$BRANCH"				\
+		--distribution "$pkg_distribution"		\
+		--release "$pkg_release"			\
+		--component "$pkg_group"			\
+		"${deps_to_be_resolved[@]}") || {
+
+		# shellcheck disable=SC2145 # I know how string_"$@" behaves and it's ok here.
+		die "Failed to resolve dependencies: deps_to_be_resolved: ${deps_to_be_resolved[@]@Q}";
+	};
 }
 
-for d in $deps_resolved; do
-	logmsg "rtbrick package dependency resolved to: [$d]"  "$ME";
-	result+=("$d");
-done
+# each line in the rtb-itool result will be in the format:
+# pkg=ver # {"json": "representation", "of": "package"}
+_d="";
+_comment="";
+while read -r _d _comment; do
+	logmsg "rtbrick package dependency resolved to: [$_d]"  "$ME";
+	[ -n "$_comment" ] && _d="$_d $_comment";
+	result+=("$_d");
+done <<< "$deps_resolved";
 
 [ "${#result[@]}" -gt "0" ] && {
 	for d in "${result[@]}"; do

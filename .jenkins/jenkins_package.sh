@@ -31,7 +31,7 @@ trap 'trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
 	echo "---------------------------------------------------------------";
 	env;
 	echo "---------------------------------------------------------------";
-}
+} >&2;
 [ "${__global_debug:-0}" -gt "1" ] && {
 	set -x;
 	# functrace is bash specific.
@@ -41,11 +41,11 @@ trap 'trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
 # Dependencies on other programs which might not be installed. Here we rely on
 # values discovered and passed on by the calling script.
 # shellcheck disable=SC2269
-_checkinstall="$(which checkinstall)";
-_dpkg="$(which dpkg)";
-_jq="${_jq:-$(which jq) -er}";
-_lsb_release="$(which lsb_release)";
-_rtb_itool="$(which rtb-itool)";
+_checkinstall="$(command -v checkinstall)";
+_dpkg="$(command -v dpkg)";
+_jq="${_jq:-$(command -v jq) -er}";
+_lsb_release="$(command -v lsb_release)";
+_uuidgen="$(command -v uuidgen)";
 
 ME="jenkins_package.sh";	# Useful for log messages.
 
@@ -89,7 +89,6 @@ pkg_is_not_dev_dbg() {
 apt_resolv_log="apt_resolv.log";
 [ -d "${__jenkins_scripts_dir:-./.jenkins}" ]	\
 	&& apt_resolv_log="${__jenkins_scripts_dir:-./.jenkins}/${apt_resolv_log}";
-
 apt_resolv_log_per_cont="${apt_resolv_log}.${DEFAULT_STEP_CONT}";
 
 # Transform the JSON list of dependencies into a comma separated list. This
@@ -126,21 +125,13 @@ fi
 cp "$PAK_FILES_LOCATION"/*-pak ./ || true;
 
 # Generate description-pak
-_git_clone_log="${__jenkins_scripts_dir:-./.jenkins}/git_clone_update.log";
-[ -f "$_git_clone_log" ] || _git_clone_log="";
-_pkg_rtb_metadata="$($_rtb_itool pkg struct gen						\
-	--description "$_pkg_descr"					\
-	--version "$_ver_str"						\
-	--branch "$BRANCH"						\
-	--commit "$GIT_COMMIT"						\
-	--commit_timestamp "$GIT_COMMIT_TS"				\
-	--commit_date "$GIT_COMMIT_DATE"				\
-	--build_timestamp "$_build_ts"					\
-	--build_date "$_build_date"					\
-	--build_job_hash "$_build_job_hash"				\
-	--git_dependencies "$_git_clone_log"				\
-	--dependencies "$apt_resolv_log_per_cont")";
-printf " %s\n" "$_pkg_rtb_metadata" > "description-pak";
+# NOTE: When checkinstall is called we also pass on `--summary=$_pkg_descr`
+# (see the _checkinstall_args array around lines 350-360). Thus what we put
+# now in description-pak will become the "long description" of the package
+# (starting at line 2).
+pkg_uuid="$($_uuidgen)";
+[ -z "$pkg_uuid" ] && die "Can't continue without a package UUID.";
+printf " RtBrick package tracker UUID=%s\n" "$pkg_uuid" > "description-pak";
 
 # Apart from running `make install` we might need to install some dynamically
 # generated files, like systemd services and/or config files. We will gather
@@ -444,6 +435,8 @@ done
 # Finally execute checkinstall with all the prepared arguments and install
 # commands.
 $_checkinstall "${_checkinstall_args[@]}" /bin/bash -ue -c "${_pkg_install_cmd}";
+
+logmsg "Package $checkinstall_pkg_name built with version $_ver_str and UUID $pkg_uuid" "$ME";
 
 # Restore working directory if it was changes by package commands.
 cd "${____initial_dir}";

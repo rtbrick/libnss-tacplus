@@ -31,7 +31,7 @@ trap 'trap_debug "$?" "$BASH_COMMAND" "$LINENO" "${BASH_SOURCE[0]}"' ERR;
 	echo "---------------------------------------------------------------";
 	env;
 	echo "---------------------------------------------------------------";
-}
+} >&2;
 [ "${__global_debug:-0}" -gt "1" ] && {
 	set -x;
 	# functrace is bash specific.
