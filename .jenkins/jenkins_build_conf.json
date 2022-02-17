@@ -18,13 +18,13 @@
           "./configure",
           "make clean",
           "make"
-        ]
+        ],
+        "compile_deps_with_dev": true
       }
     ],
     "pkg_group": "rtbrick-onl",
     "pkg_distribution": "debian",
-    "pkg_release": "stretch",
-    "upload_script": ".jenkins/jenkins_upload_to_latest_debian_rtbrick-onl_stretch_rtbrick-onl.sh"
+    "pkg_release": "stretch"
   },
   "__defaults__": {
     "project": "rtbrick-libnss-tacplus",
@@ -49,7 +49,8 @@
           "./configure",
           "make clean",
           "make"
-        ]
+        ],
+        "compile_deps_with_dev": true
       }
     ],
     "pkg_commands": [
@@ -68,7 +69,6 @@
     ],
     "pkg_services": [],
     "pkg_distribution": "ubuntu",
-    "pkg_release": "bionic",
-    "upload_script": ".jenkins/jenkins_upload_to_latest_ubuntu_rtbrick-rbfs_bionic_rtbrick-rbfs.sh"
+    "pkg_release": "bionic"
   }
 }
