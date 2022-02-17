@@ -24,7 +24,7 @@ if [ "__{{ .ServiceName }}" != "__" ] && [ "__{{ .ServiceName }}" != "__ " ]; th
 	srv_name="{{ .ServiceName }}";
 	>&2 echo "Running enable and start for package service '$srv_name' ...";
 	case $_codename in
-		bionic|focal)
+		bionic|focal|jammy)
 			_systemctl="$(which systemctl)"	\
 				|| _systemctl="echo [systemctl not found]: would have run: systemctl";
 
@@ -53,7 +53,11 @@ if [ "__{{ .ServiceName }}" != "__" ] && [ "__{{ .ServiceName }}" != "__ " ]; th
 				}
 			}
 			;;
-		stretch|buster)
+		# We use the Debian release code-names to detect when a package
+		# is being installed in ONL. Newer Debian versions actually use
+		# systemd just like Ubuntu but the ONL build even if it's based
+		# on newer Debian versions still uses SysVinit . 
+		stretch|buster|bullseye)
 			update-rc.d "$srv_name" defaults;
 			# Starting the service will probably fail if the package
 			# is installed during an image build.
