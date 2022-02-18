@@ -66,6 +66,7 @@ _pkg_name="${pkg_name:-}"; [ -z "$_pkg_name" ] && die "Cannot build a package wi
 _pkg_suffix="${pkg_suffix:-}";
 _pkg_descr="${pkg_descr:-}"; [ -z "$_pkg_descr" ] && die "Cannot build a package without a descripion.";
 _pkg_group="${pkg_group:-}"; [ -z "$_pkg_group" ] && die "Cannot build a package without a group.";
+_pkg_release="${pkg_release:-}";
 _pkg_provides="${pkg_provides:-}";
 _pkg_conflicts="${pkg_conflicts:-}";
 _pkg_deps="${pkg_deps:-}";
@@ -345,8 +346,10 @@ fi
 # Get architecture and ubuntu release codename.
 rel_arch="$($_dpkg --print-architecture)";
 [ -z "$rel_arch" ] && die "Cannot build a package without knowing the arch.";
-rel_codename="$($_lsb_release -c -s)";
-[ -z "$rel_codename" ] && die "Cannot build a package without knowing the release codename.";
+[ -z "$_pkg_release" ] && {
+	_pkg_release="$($_lsb_release -c -s)";
+	[ -z "$_pkg_release" ] && die "Cannot build a package without knowing the release codename.";
+}
 
 checkinstall_pkg_name="$_pkg_name";
 [ -n "$_pkg_suffix" ] && checkinstall_pkg_name="${_pkg_name}-${_pkg_suffix}";
@@ -397,7 +400,7 @@ _tmp="$(echo "$_ver_str" | grep -Ec -- '-')" && {
 	# contain a "debian_version" (called "pkg release" in
 	# checkinstall terms). See:
 	# https://www.debian.org/doc/debian-policy/ch-controlfields.html#version
-	_checkinstall_args+=("--pkgrelease=$rel_codename");
+	_checkinstall_args+=("--pkgrelease=$_pkg_release");
 };
 
 ####

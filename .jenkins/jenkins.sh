@@ -809,6 +809,8 @@ for pkg_suffix in "" "dev" "dbg"; do
 				-e "pkg_name=$pkg_name"				\
 				-e "pkg_suffix=$pkg_suffix"			\
 				-e "pkg_descr=$pkg_descr"			\
+				-e "pkg_distribution=$pkg_distribution"		\
+				-e "pkg_release=$pkg_release"			\
 				-e "pkg_group=$pkg_group"			\
 				-e "pkg_provides=$pkg_provides"			\
 				-e "pkg_conflicts=$pkg_conflicts"		\

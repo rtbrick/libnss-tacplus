@@ -122,7 +122,6 @@ _hostname="$(which hostname)"		export _hostname;
 _jq="$(which jq) -er";			export _jq;
 _mktemp="$(which mktemp)";		export _mktemp;
 _perl="$(which perl)";			export _perl;
-_rtb_itool="${_rtb_itool:-$(command -v rtb-itool-jenkins || command -v rtb-itool)}";
 _sha256sum="$(which sha256sum || which sha256)"; export _sha256sum;
 
 # We can't actually check for the existence of the docker command since this
@@ -1296,6 +1295,10 @@ docker_prepare() {
 				# NOTE: '$_docker exec' vs '$_docker_exec' is
 				# NOT a mistake here.
 				# shellcheck disable=SC2086
+				local _rtb_itool_pass_if_set="_rtb_itool_not_set=true";
+				[ -n "${_rtb_itool:-}" ] && {
+					_rtb_itool_pass_if_set="_rtb_itool=$_rtb_itool";
+				}
 				local deps_resolved="";
 				deps_resolved="$($_docker exec						\
 					-e "DEBIAN_FRONTEND=noninteractive"				\
@@ -1303,7 +1306,7 @@ docker_prepare() {
 					-e "BRANCH=$BRANCH"						\
 					-e "BRANCH_SANITIZED=$BRANCH_SANITIZED"				\
 					-e "__jenkins_scripts_dir=${__jenkins_scripts_dir:-./.jenkins}"	\
-					-e "_rtb_itool=$_rtb_itool"					\
+					-e "$_rtb_itool_pass_if_set"					\
 					-e "pkg_name=$pkg_name"						\
 					-e "pkg_group=$pkg_group"					\
 					-e "pkg_distribution=$pkg_distribution"				\
