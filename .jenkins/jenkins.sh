@@ -618,8 +618,10 @@ pkg_name="$(get_build_key_or_def "$build_name" "pkg_name" || true)";
 			$apt_resolv_script "$cont_deps")";
 
 		echo "$deps_resolved" > "$apt_resolv_log_per_cont";
-		logmsg "Package compile time dependencies resolved: $apt_resolv_log_per_cont:" "$ME";
-		cat "$apt_resolv_log_per_cont";
+		[ "${__global_debug:-0}" -gt "0" ] && {
+			logmsg "Package compile time dependencies resolved: $apt_resolv_log_per_cont:" "$ME";
+			cat "$apt_resolv_log_per_cont";
+		}
 	fi
 
 	logmsg "Checking if the package needs a re-build (pkg needbuild) ..." "$ME";
